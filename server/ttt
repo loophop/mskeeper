@@ -1,0 +1,3 @@
+?   	gitlab.papegames.com/fringe/mskeeper/server	[no test files]
+ok  	gitlab.papegames.com/fringe/mskeeper/server/httpsvr	6.255s	coverage: 100.0% of statements
+ok  	gitlab.papegames.com/fringe/mskeeper/server/service	25.506s	coverage: 98.2% of statements

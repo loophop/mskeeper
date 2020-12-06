@@ -1,0 +1,118 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "mskeeper api-server",
+        "title": "mskeeper",
+        "contact": {},
+        "license": {},
+        "version": "2.0.1"
+    },
+    "basePath": "/v1/",
+    "paths": {
+        "/mysql/check": {
+            "post": {
+                "description": "check sql through mskeeper",
+                "consumes": [
+                    "application/x-www-form-urlencoded"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Init API返回的UUID",
+                        "name": "uuid",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "执行的SQL",
+                        "name": "sql",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "SQL执行的时间，单位：ms",
+                        "name": "dura",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "SQL执行的参数，eg. [1,2,'333',4.44]",
+                        "name": "args",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpsvr.RetData"
+                        }
+                    }
+                }
+            }
+        },
+        "/mysql/init": {
+            "post": {
+                "description": "通过dsn初始化mskeeper实例, dsn规则 https://www.cnblogs.com/diegodu/p/5586861.html",
+                "consumes": [
+                    "application/x-www-form-urlencoded"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "mskeeper session",
+                        "name": "session",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "mysql dsn, eg. mskeeper_test:123456@tcp(192.168.0.86:3306)/mskeepertest?timeout=30s",
+                        "name": "dsn",
+                        "in": "formData",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpsvr.RetData"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "httpsvr.RetData": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "$ref": "#/definitions/httpsvr.RetModel"
+                },
+                "msg": {
+                    "type": "string"
+                },
+                "ret": {
+                    "type": "integer"
+                },
+                "time": {
+                    "type": "integer"
+                }
+            }
+        },
+        "httpsvr.RetModel": {
+            "type": "object",
+            "additionalProperties": true
+        }
+    }
+}

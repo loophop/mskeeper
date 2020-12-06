@@ -1,0 +1,914 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/handlers.go (100.0%)</option>
+				
+				<option value="file1">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/iprange.go (100.0%)</option>
+				
+				<option value="file2">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/manager.go (100.0%)</option>
+				
+				<option value="file3">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/retdata.go (100.0%)</option>
+				
+				<option value="file4">gitlab.papegames.com/fringe/mskeeper/server/service/i18n.go (100.0%)</option>
+				
+				<option value="file5">gitlab.papegames.com/fringe/mskeeper/server/service/mysql.go (97.2%)</option>
+				
+				<option value="file6">gitlab.papegames.com/fringe/mskeeper/server/service/service.go (100.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package httpsvr
+
+import (
+        "encoding/json"
+        "github.com/gin-gonic/gin"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+        "gitlab.papegames.com/fringe/mskeeper/server/service"
+        // syslog "log"
+        "fmt"
+        "net/http"
+        "strconv"
+        "time"
+)
+
+type GinWrapper func(*gin.Context, http.ResponseWriter, *http.Request)
+
+// type HTTPWrapperGin struct {
+//         handle http.HandlerFunc
+// }
+
+// func NewHTTPWrapperGin(handle http.HandlerFunc) *HTTPWrapperGin {
+//         return &amp;HTTPWrapperGin{handle: handle}
+// }
+
+// func (httpwg *HTTPWrapperGin) HandleFunc(c *gin.Context) {
+//         httpwg.handle(c.Writer, c.Request)
+// }
+func NewHTTPWrapperGin(handle http.HandlerFunc) gin.HandlerFunc <span class="cov8" title="1">{
+        return func(c *gin.Context) </span><span class="cov8" title="1">{
+                handle(c.Writer, c.Request)
+        }</span>
+}
+
+// @Title 初始化mskeeper的会话
+// @Description 通过dsn初始化mskeeper实例, dsn规则 https://www.cnblogs.com/diegodu/p/5586861.html
+// @Produce json
+// @Accept x-www-form-urlencoded
+// @Param dsn formData string true "mysql dsn, eg. mskeeper_test:123456@tcp(192.168.0.86:3306)/mskeepertest?timeout=30s"
+// @Param timeout formData float64 false "DB连接的超时时间, 单位:micros, defautyl 5s"
+// @Success 200 {object} RetData
+// @Router /mysql/init [post]
+func MySQLInitHandlerS(c *gin.Context) <span class="cov8" title="1">{
+        ret := NewRet()
+        defer c.JSON(http.StatusOK, ret)
+
+        timeoutstr := c.Request.FormValue("timeout")
+        dsn := c.Request.FormValue("dsn") // mysql driver的dsn，用于生成UUID以及打开数据库
+        if dsn == "" </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLInitHandlerS(%v): failed to parse dsn %v",
+                        dsn, dsn)
+                ret.Error(RetErrArgs, service.Tr(service.GetLanguage(c.Request), "dsn_empty"))
+                return
+        }</span>
+
+        <span class="cov8" title="1">timeout, _ := strconv.ParseFloat(timeoutstr, 64)
+        sess, err := service.NewMySQLService(dsn)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLInitHandlerS(%v): failed(%v) to init MySQL Service",
+                        dsn, err)
+                ret.Error(RetErrFailToInitService, err.Error())
+                return
+        }</span>
+
+        <span class="cov8" title="1">requestDB := service.ServicePingDBRequest{Timeout: timeout}
+        responseDB := &amp;service.ServicePingDBResponse{Request: requestDB}
+        err = sess.PingDB(requestDB, responseDB)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLInitHandlerS(%v): failed(%v) to ping MySQL instance",
+                        dsn, err)
+                ret.Error(RetErrPingFailure, err.Error())
+                return
+        }</span>
+
+        <span class="cov8" title="1">ret.SetData("msid", sess.GetUUID())</span>
+}
+
+// @Title 检测SQL的安全性
+// @Description check sql through mskeeper
+// @Produce json
+// @Accept x-www-form-urlencoded
+// @Param msid formData string true "Init API返回的MSID"
+// @Param sql formData string true "执行的SQL"
+// @Param args formData string false "SQL执行的参数，eg. [1,2,'333',4.44]"
+// @Param timeout formData float64 false "DB连接的超时时间, 单位:micros, defautyl 5s"
+// @Success 200 {object} RetData
+// @Router /mysql/check [post]
+func MySQLCheckHandlerS(c *gin.Context) <span class="cov8" title="1">{
+        ret := NewRet()
+        defer c.JSON(http.StatusOK, ret)
+
+        msid := c.Request.FormValue("msid")
+        sql := c.Request.FormValue("sql")
+        argstr := c.Request.FormValue("args")
+        timeoutstr := c.Request.FormValue("timeout")
+
+        var args []interface{}
+        if argstr != "" </span><span class="cov8" title="1">{
+                err := json.Unmarshal([]byte(argstr), &amp;args)
+                if err != nil </span><span class="cov8" title="1">{
+                        log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v): failed(%v) parse args %v",
+                                msid, sql, argstr, err, argstr)
+                        ret.Error(RetErrArgs, err.Error())
+                        return
+                }</span>
+        }
+        <span class="cov8" title="1">timeout, _ := strconv.ParseFloat(timeoutstr, 64)
+
+        sess, err := service.GetMSKSession(msid)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v): failed(%v) to fetch MySQL Service",
+                        msid, sql, argstr, err)
+                ret.Error(RetErrFailToGetService, err.Error())
+                return
+        }</span>
+
+        // 由于CheckSQL本身不检查DB的连通性，就是即使SQL有问题但是DB不同，结果也是SafeSQL
+        // 因而为了提高体验，增加了PingDB以区别SafeSQL和DB Fail这两种情况
+        <span class="cov8" title="1">requestDB := service.ServicePingDBRequest{Timeout: timeout}
+        responseDB := &amp;service.ServicePingDBResponse{Request: requestDB}
+        err = sess.PingDB(requestDB, responseDB)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v): failed(%v) to connect DB",
+                        msid, sql, argstr, err)
+                ret.Error(RetErrPingFailure, err.Error())
+                return
+        }</span>
+
+        <span class="cov8" title="1">request := service.ServiceCheckSQLRequest{SQL: sql, MSID: msid, Args: args}
+        response := &amp;service.ServiceCheckSQLResponse{Request: request}
+        err = sess.CheckSQL(request, response)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v): failed(%v) check sql",
+                        msid, sql, argstr, err)
+                ret.Error(RetErrCheckFailure, err.Error())
+                return
+        }</span>
+
+        <span class="cov8" title="1">ret.SetData("request", response.Request)
+        ret.SetData("notifies", response.Notifies)</span>
+}
+
+// @Title 在给定的dsn上跑SQL
+// @Description run the sql by dsn passed by /v1/mysql/init
+// @Produce json
+// @Accept x-www-form-urlencoded
+// @Param msid formData string true "Init API返回的MSID"
+// @Param sql formData string true "执行的SQL"
+// @Param duration formData int false "SQL执行时间的告警上限，单位：microsec"
+// @Param args formData string false "SQL执行的参数，eg. [1,2,'333',4.44]"
+// @Param timeout formData int false "DB连接的超时时间, 单位:micros, defautyl 5s"
+// @Success 200 {object} RetData
+// @Router /mysql/run [post]
+func MySQLRunHandlerS(c *gin.Context) <span class="cov8" title="1">{
+        ret := NewRet()
+        defer c.JSON(http.StatusOK, ret)
+        stime := time.Now()
+
+        msid := c.Request.FormValue("msid")
+        sql := c.Request.FormValue("sql")
+        durastr := c.Request.FormValue("duration")
+        argstr := c.Request.FormValue("args")
+        timeoutstr := c.Request.FormValue("timeout")
+
+        var args []interface{}
+        if argstr != "" </span><span class="cov8" title="1">{
+                err := json.Unmarshal([]byte(argstr), &amp;args)
+                if err != nil </span><span class="cov8" title="1">{
+                        log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v, %v): failed(%v) parse args %v",
+                                msid, sql, durastr, argstr, err, argstr)
+                        ret.Error(RetErrArgs, err.Error())
+                        return
+                }</span>
+        }
+
+        <span class="cov8" title="1">var dura int64
+        if durastr != "" </span><span class="cov8" title="1">{
+                dura, _ = strconv.ParseInt(durastr, 10, 64)
+        }</span>
+
+        <span class="cov8" title="1">timeout, _ := strconv.ParseFloat(timeoutstr, 64)
+
+        sess, err := service.GetMSKSession(msid)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLRunHandlerS(%v, %v, %v, %v): failed(%v) to fetch MySQL Service",
+                        msid, sql, durastr, argstr, err)
+                ret.Error(RetErrFailToGetService, err.Error())
+                return
+        }</span>
+
+        <span class="cov8" title="1">request := service.ServiceRunSQLRequest{SQL: sql, MSID: msid, Duration: dura, Args: args, Timeout: timeout}
+        response := &amp;service.ServiceRunSQLResponse{Request: request}
+        err = sess.RunSQL(request, response)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLRunHandlerS(%v, %v, %v, %v): failed(%v) run sql",
+                        msid, sql, durastr, argstr, err)
+                ret.Error(RetErrRunFailure, err.Error())
+                return
+        }</span>
+
+        <span class="cov8" title="1">ret.SetData("request", response.Request)
+        ret.SetData("notifies", response.Notifies)
+        ret.SetData("results", response.Result)
+        ret.SetData("taking", fmt.Sprintf("%.1fms", time.Since(stime).Seconds()*1000))</span>
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package httpsvr
+
+import (
+        "bytes"
+        "net"
+)
+
+//ipRange - a structure that holds the start and end of a range of ip addresses
+type ipRange struct {
+        start net.IP
+        end   net.IP
+}
+
+// inRange - check to see if a given ip address is within a range given
+func inRange(r ipRange, ipAddress net.IP) bool <span class="cov8" title="1">{
+        // strcmp type byte comparison
+        if bytes.Compare(ipAddress, r.start) &gt;= 0 &amp;&amp; bytes.Compare(ipAddress, r.end) &lt; 0 </span><span class="cov8" title="1">{
+                return true
+        }</span>
+        <span class="cov8" title="1">return false</span>
+}
+
+var privateRanges = []ipRange{
+        {
+                start: net.ParseIP("10.0.0.0"),
+                end:   net.ParseIP("10.255.255.255"),
+        },
+        {
+                start: net.ParseIP("100.64.0.0"),
+                end:   net.ParseIP("100.127.255.255"),
+        },
+        {
+                start: net.ParseIP("172.16.0.0"),
+                end:   net.ParseIP("172.31.255.255"),
+        },
+        {
+                start: net.ParseIP("192.0.0.0"),
+                end:   net.ParseIP("192.0.0.255"),
+        },
+        {
+                start: net.ParseIP("192.168.0.0"),
+                end:   net.ParseIP("192.168.255.255"),
+        },
+        {
+                start: net.ParseIP("198.18.0.0"),
+                end:   net.ParseIP("198.19.255.255"),
+        },
+}
+
+// isPrivateSubnet - check to see if this ip is in a private subnet
+func isPrivateSubnet(ipAddress net.IP) bool <span class="cov8" title="1">{
+        // my use case is only concerned with ipv4 atm
+        if ipCheck := ipAddress.To4(); ipCheck != nil </span><span class="cov8" title="1">{
+                // iterate over all our ranges
+                for _, r := range privateRanges </span><span class="cov8" title="1">{
+                        // check if this ip is in a private range
+                        if inRange(r, ipAddress) </span><span class="cov8" title="1">{
+                                return true
+                        }</span>
+                }
+        }
+        <span class="cov8" title="1">return false</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package httpsvr
+
+import (
+        "github.com/gin-gonic/gin"
+        "github.com/swaggo/gin-swagger"
+        "github.com/swaggo/gin-swagger/swaggerFiles"
+        _ "gitlab.papegames.com/fringe/mskeeper/server/docs"
+        "net/http"
+        "net/http/pprof"
+)
+
+// 注册 HTTPS handler
+func RegisterHTTPSHandler() *gin.Engine <span class="cov8" title="1">{
+
+        gin.SetMode(gin.ReleaseMode)
+
+        router := gin.Default()
+
+        debug := router.Group("/debug")
+        </span><span class="cov8" title="1">{
+                debug.GET("/pprof", NewHTTPWrapperGin(pprof.Index))
+        }</span>
+
+        <span class="cov8" title="1">v1 := router.Group("/v1")
+        </span><span class="cov8" title="1">{
+                v1.POST("/mysql/init", MySQLInitHandlerS)
+                v1.POST("/mysql/check", MySQLCheckHandlerS)
+                v1.POST("/mysql/run", MySQLRunHandlerS)
+        }</span>
+
+        // 文档界面访问URL
+        <span class="cov8" title="1">router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+        router.GET("/", func(c *gin.Context) </span><span class="cov8" title="1">{
+                // 指定重定向的URL 通过HandleContext进行重定向到test2 页面显示json数据
+                c.Redirect(http.StatusMovedPermanently, "/swagger/index.html")
+        }</span>)
+
+        <span class="cov8" title="1">return router</span>
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package httpsvr
+
+import (
+        "time"
+)
+
+const (
+        RetSuccess = 0
+
+        RetErrCommon            = 1000 // 通用错误
+        RetErrServerTimeout     = 1001 // 服务器处理超时（一般会处理完成、必要情况下需要rollback处理）
+        RetErrFailToInitService = 1002 // mskeeper服务初始化失败
+        RetErrFailToGetService  = 1003 // mskeeper服务获取失败
+        RetErrCheckFailure      = 1004 // sql检测异常
+        RetErrArgs              = 1005 // 参数错误
+        RetErrRunFailure        = 1006 // sql运行失败
+        RetErrPingFailure       = 1007 // 数据库连接异常
+)
+
+type RetModel map[string]interface{}
+
+type RetData struct {
+        Data RetModel `json:"data,omitempty"`
+        Ret  uint32   `json:"ret"`
+        Msg  string   `json:"msg,omitempty"`
+        Time int64    `json:"time"`
+}
+
+func NewRet() *RetData <span class="cov8" title="1">{
+        return &amp;RetData{
+                Ret:  RetSuccess,
+                Time: time.Now().Unix(),
+                Data: make(RetModel),
+        }
+}</span>
+
+func (r *RetData) SetData(key string, value interface{}) <span class="cov8" title="1">{
+        r.Data[key] = value
+}</span>
+
+func (r *RetData) Error(ret uint32, msg string) <span class="cov8" title="1">{
+        r.Ret = ret
+        r.Msg = msg
+}</span>
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">package service
+
+import (
+        "encoding/json"
+        "errors"
+        "io/ioutil"
+        "net/http"
+        "path/filepath"
+        "strings"
+)
+
+// Translation - localization structure
+type translation struct {
+        locales      []string
+        translations map[string]map[string]string
+}
+
+var trans *translation
+
+// initLocales - initiate locales from the folder
+func initLocales(trPath string) error <span class="cov8" title="1">{
+        trans = &amp;translation{translations: make(map[string]map[string]string)}
+        return loadTranslations(trPath)
+}</span>
+
+// Tr - translate for current locale
+func Tr(locale string, trKey string) string <span class="cov8" title="1">{
+        trValue, ok := trans.translations[locale][trKey]
+        if ok </span><span class="cov8" title="1">{
+                return trValue
+        }</span>
+        <span class="cov8" title="1">trValue, ok = trans.translations["en"][trKey]
+        if ok </span><span class="cov8" title="1">{
+                return trValue
+        }</span>
+        <span class="cov8" title="1">return trKey</span>
+}
+
+// GetLanguage - get language, which is in force
+func GetLanguage(r *http.Request) string <span class="cov8" title="1">{
+
+        langLower := r.FormValue("lang")
+        langUpper := r.FormValue("LANG")
+
+        if langLower != "" </span><span class="cov8" title="1">{
+                return langLower
+        }</span> else<span class="cov8" title="1"> if langUpper != "" </span><span class="cov8" title="1">{
+                return langUpper
+        }</span>
+        <span class="cov8" title="1">return ""</span>
+}
+
+// LoadTranslations - load translations files from the folder
+func loadTranslations(trPath string) error <span class="cov8" title="1">{
+        files, err := filepath.Glob(trPath + "/*.json")
+        if err != nil </span><span class="cov8" title="1">{
+                return err
+        }</span>
+
+        <span class="cov8" title="1">if len(files) == 0 </span><span class="cov8" title="1">{
+                return errors.New("No translations found")
+        }</span>
+
+        <span class="cov8" title="1">for _, file := range files </span><span class="cov8" title="1">{
+                err := loadFileToMap(file)
+                if err != nil </span><span class="cov8" title="1">{
+                        return err
+                }</span>
+        }
+        <span class="cov8" title="1">return nil</span>
+}
+
+func loadFileToMap(filename string) error <span class="cov8" title="1">{
+        var objmap map[string]string
+
+        localName := strings.Replace(filepath.Base(filename), ".json", "", 1)
+
+        content, err := ioutil.ReadFile(filename)
+        if err != nil </span><span class="cov8" title="1">{
+                return err
+        }</span>
+
+        <span class="cov8" title="1">err = json.Unmarshal(content, &amp;objmap)
+        if err != nil </span><span class="cov8" title="1">{
+                return err
+        }</span>
+        <span class="cov8" title="1">trans.translations[localName] = objmap
+        trans.locales = append(trans.locales, localName)
+        return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file5" style="display: none">package service
+
+import (
+        "database/sql"
+        "fmt"
+        uuid "github.com/satori/go.uuid"
+        mskdriver "gitlab.papegames.com/fringe/mskeeper/driver"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+        "gitlab.papegames.com/fringe/mskeeper/misc"
+        "gitlab.papegames.com/fringe/mskeeper/mysql"
+        "gitlab.papegames.com/fringe/mskeeper/notifier"
+        "gitlab.papegames.com/fringe/mskeeper/options"
+        "gitlab.papegames.com/fringe/mskeeper/policy"
+        "gitlab.papegames.com/fringe/mskeeper/sqlparser"
+        // syslog "log"
+        "context"
+        "os"
+        "reflect"
+        "time"
+)
+
+const (
+        MaxConnForEachDSN = 2 // 每个dns对应的最大DB链接数
+)
+
+type MySQLService struct {
+        msk  *mskdriver.MSKeeper
+        msid string
+}
+
+func (msqls *MySQLService) GetMSKeeper() *mskdriver.MSKeeper <span class="cov8" title="1">{
+        return msqls.msk
+}</span>
+
+func NewMySQLService(dsn string) (*MySQLService, error) <span class="cov8" title="1">{
+        msid := uuid.NewV3(uuid.UUID{}, misc.MD5String(dsn)).String()
+
+        sess, err := GetMSKSession(msid)
+        if err == nil &amp;&amp; sess.(*MySQLService) != nil </span><span class="cov8" title="1">{
+                return sess.(*MySQLService), nil
+        }</span>
+
+        <span class="cov8" title="1">msservice := &amp;MySQLService{msid: msid}
+        // Verify the dsn and register the driver
+        db, err := sql.Open("mskeeper", dsn)
+        if err != nil </span><span class="cov8" title="1">{
+                return msservice, err
+        }</span>
+        <span class="cov8" title="1">defer db.Close()
+
+        // dsn should have been registered successfully when sql.Open
+        msservice.msk = mysql.MSKeeperInstance(dsn)
+        msservice.msk.Flush()
+        msservice.msk.ClearStatus() // 单元的时候应为dsn唯一，为了防止单元相互影响，初始化一下。
+
+        // ignore exists
+        _ = os.Mkdir("./logs", os.ModePerm)
+
+        msservice.msk.SetOptions(
+                options.WithSwitch(false), // 异步check队列关闭
+                options.WithMaxExecTime(5*time.Second),
+                options.WithNotifier(notifier.NewNotifierMux(
+                        notifier.NewNotifierLog(fmt.Sprintf("./logs/mskeeper_%v.log", msid)).SetLogLevel(notifier.InfoLevel),
+                        notifier.NewDefaultNotifier().SetLogLevel(notifier.WarnLevel))),
+                options.WithLogOutput(os.Stdout),
+                options.WithLogLevel(notifier.WarnLevel),       // 设置mskeeper自身的日志级别
+                options.WithSQLWhiteLists("SELECT version();"), // skip the sql that used by mskeeper itself
+                options.WithMaxSilentPeriod(1*time.Second),     // restfulapi 暂时只需要瞬时排重
+                options.WithSQLCacheSize(0),
+        )
+
+        _ = msservice.msk.AttachPolicy(policy.NewPolicyCheckerRowsAbsolute(10000))
+        _ = msservice.msk.AttachPolicy(policy.NewPolicyCheckerRowsInvolved())
+        _ = msservice.msk.AttachPolicy(policy.NewPolicyCheckerFieldsType())
+        _ = msservice.msk.AttachPolicy(policy.NewPolicyCheckerFieldsLength())
+
+        _ = addMSKSession(msid, msservice)
+
+        return msservice, nil</span>
+}
+
+func (this *MySQLService) RunSQL(req ServiceRunSQLRequest, res *ServiceRunSQLResponse) (reterr error) <span class="cov8" title="1">{
+        stmt, err := sqlparser.Parse(req.SQL)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLService:RunSQL(%v, %v) sqlparser.Parse failed with err %v",
+                        req, res, err)
+                reterr = err
+                return
+        }</span>
+        <span class="cov8" title="1">if req.Timeout &lt;= 0 </span><span class="cov8" title="1">{
+                req.Timeout = MaxPingTimeout
+        }</span>
+        <span class="cov8" title="1">ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.Timeout*float64(time.Microsecond)))
+        defer cancel()
+        res.Notifies = []policy.PolicyError{}
+        if req.Duration &gt; 0 </span><span class="cov8" title="1">{
+                this.GetMSKeeper().SetOption(options.WithMaxExecTime(time.Duration(req.Duration) * time.Millisecond))
+        }</span>
+
+        <span class="cov8" title="1">defer func() </span><span class="cov8" title="1">{
+                chkReq := ServiceCheckSQLRequest{
+                        SQL:  req.SQL,
+                        MSID: req.MSID,
+                        Args: req.Args,
+                }
+                chkRes := &amp;ServiceCheckSQLResponse{Request: chkReq}
+                err := this.CheckSQL(chkReq, chkRes)
+                if err != nil </span><span class="cov8" title="1">{
+                        log.MSKLog().Infof("MySQLService:RunSQL(%v, %v) CheckSQL(%v, %v) failed with err %v",
+                                req, res, chkReq, chkRes, err)
+                        return
+                }</span>
+
+                <span class="cov8" title="1">res.Notifies = chkRes.Notifies</span>
+        }()
+        <span class="cov8" title="1">switch stmt.(type) </span>{
+        case *sqlparser.Select, *sqlparser.OtherRead, *sqlparser.Show:<span class="cov8" title="1">
+                res.Result.RowsAffected = 0
+
+                // select with result
+                // nargs, _ := mysql.Converter{}.ConvertValues(req.Args)
+                rows, err := this.msk.RawDB().QueryContext(ctx, req.SQL, req.Args...)
+                if err != nil </span><span class="cov8" title="1">{
+                        log.MSKLog().Errorf("MySQLService:RunSQL(%v, %v) Query failed with err %v",
+                                req, res, err)
+                        reterr = err
+                        return
+                }</span>
+                <span class="cov8" title="1">defer rows.Close()
+                columnNames, _ := rows.Columns()
+                res.Result.Columns = make([]RunColumn, len(columnNames))
+                tt, _ := rows.ColumnTypes()
+                types := make([]reflect.Type, len(columnNames))
+                for i, tp := range tt </span><span class="cov8" title="1">{
+                        types[i] = tp.ScanType()
+                        res.Result.Columns[i] = RunColumn{Name: tp.Name(), DataType: tp.DatabaseTypeName()}
+                }</span>
+                <span class="cov8" title="1">columns := make([]interface{}, len(columnNames))
+                for i := range columns </span><span class="cov8" title="1">{
+                        columns[i] = reflect.New(types[i]).Interface()
+                }</span>
+                // syslog.Printf("columnNames %v", columnNames)
+
+                <span class="cov8" title="1">res.Result.Rows = make([][]interface{}, 0)
+                for rows.Next() </span><span class="cov8" title="1">{
+
+                        err := rows.Scan(columns...)
+                        if err != nil </span><span class="cov0" title="0">{
+                                log.MSKLog().Errorf("MySQLService:RunSQL(%v, %v) rows.Scan with err %v",
+                                        req, res, err)
+                                reterr = err
+                                return
+                        }</span>
+                        <span class="cov8" title="1">var row []interface{} = make([]interface{}, 0)
+                        for _, columnValue := range columns </span><span class="cov8" title="1">{
+                                value, _ := mysql.Converter{}.ConvertValue(columnValue)
+                                // []byte to string
+                                if reflect.ValueOf(columnValue).Elem().Kind() == reflect.Slice </span><span class="cov8" title="1">{
+                                        row = append(row, string(value.([]byte)))
+                                }</span> else<span class="cov8" title="1"> {
+                                        row = append(row, value)
+                                }</span>
+                        }
+                        // syslog.Printf("row %v ", row)
+                        <span class="cov8" title="1">res.Result.Rows = append(res.Result.Rows, row)</span>
+                }
+                <span class="cov8" title="1">return rows.Err()</span>
+
+        case *sqlparser.Begin, *sqlparser.Rollback, *sqlparser.Commit:<span class="cov8" title="1">
+                // not support
+                err := ErrStatementNotSupported
+                log.MSKLog().Warnf("MySQLService:RunSQL(%v, %v) statement not supported",
+                        req, res)
+                reterr = err
+                return</span>
+        default:<span class="cov8" title="1">
+                // execute sql
+                result, err := this.msk.RawDB().ExecContext(ctx, req.SQL, req.Args...)
+                if err != nil </span><span class="cov8" title="1">{
+                        log.MSKLog().Errorf("MySQLService:RunSQL(%v, %v) Execute failed with err %v",
+                                req, res, err)
+                        reterr = err
+                        return
+                }</span>
+                <span class="cov8" title="1">ra, _ := result.RowsAffected()
+                res.Result.RowsAffected = ra</span>
+        }
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+func (this *MySQLService) CheckSQL(req ServiceCheckSQLRequest, res *ServiceCheckSQLResponse) error <span class="cov8" title="1">{
+
+        res.Notifies = []policy.PolicyError{}
+        rawerrors := []error{}
+        nargs, _ := mysql.Converter{}.ConvertValues(req.Args)
+        err := this.msk.SyncProcess(
+                time.Now(), req.SQL, nargs, &amp;rawerrors)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Infof("MySQLService:CheckSQL(%v, %v) failed %v",
+                        req, res, err)
+                return err
+        }</span>
+        <span class="cov8" title="1">for _, rawerror := range rawerrors </span><span class="cov8" title="1">{
+                pe, _ := rawerror.(*policy.PolicyError)
+                res.Notifies = append(res.Notifies, *pe)
+        }</span>
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+func (this *MySQLService) PingDB(req ServicePingDBRequest, res *ServicePingDBResponse) error <span class="cov8" title="1">{
+
+        if req.Timeout &lt;= 0 </span><span class="cov8" title="1">{
+                req.Timeout = MaxPingTimeout
+        }</span>
+
+        <span class="cov8" title="1">ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.Timeout*float64(time.Microsecond)))
+        defer cancel()
+        err := this.msk.RawDB().PingContext(ctx)
+        if err != nil </span><span class="cov8" title="1">{
+                log.MSKLog().Errorf("MySQLService:PingDB(%v, %v): failed(%v) to ping MySQL instance",
+                        req, res, err)
+                return err
+        }</span>
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+func (this *MySQLService) GetUUID() string <span class="cov8" title="1">{
+        return this.msid
+}</span>
+</pre>
+		
+		<pre class="file" id="file6" style="display: none">package service
+
+import (
+        "errors"
+        lru "github.com/hashicorp/golang-lru"
+        mskdriver "gitlab.papegames.com/fringe/mskeeper/driver"
+        logmsk "gitlab.papegames.com/fringe/mskeeper/log"
+        "gitlab.papegames.com/fringe/mskeeper/policy"
+)
+
+const (
+        MaxSessionClient = 100     // 一个msk server实例最大的msk instance数 by dsn
+        MaxPingTimeout   = 5000000 // DB连接最大的超时时间，unit: microsec
+)
+
+var (
+        ErrSessionNotExists      = errors.New("MSKeeper session not exists")
+        ErrStatementNotSupported = errors.New("MSKeeper sql statement not supported")
+)
+
+var (
+        sessionmap *lru.Cache
+)
+
+func Init(langPath string, maxClient ...interface{}) error <span class="cov8" title="1">{
+        var err error
+
+        uplimit := MaxSessionClient
+        // Parse uplimit
+        for i := 0; i &lt; len(maxClient); i++ </span><span class="cov8" title="1">{
+                u, ok := maxClient[i].(int)
+                if ok </span><span class="cov8" title="1">{
+                        uplimit = u
+                        break</span>
+                }
+        }
+
+        <span class="cov8" title="1">sessionmap, err = lru.New(uplimit)
+        if err != nil </span><span class="cov8" title="1">{
+                logmsk.MSKLog().Errorf("sessionmap init failed (%v)\n", err)
+                return err
+        }</span>
+        <span class="cov8" title="1">if err := initLocales(langPath); err != nil </span><span class="cov8" title="1">{
+                logmsk.MSKLog().Errorf("Locales failed (%v)\n", err)
+                return err
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+func GetMSKSession(uuid string) (Servicer, error) <span class="cov8" title="1">{
+        session, ok := sessionmap.Get(uuid)
+        if !ok </span><span class="cov8" title="1">{
+                return nil, ErrSessionNotExists
+        }</span>
+        <span class="cov8" title="1">return session.(Servicer), nil</span>
+}
+
+func addMSKSession(uuid string, sess Servicer) error <span class="cov8" title="1">{
+        sessionmap.Add(uuid, sess)
+        return nil
+}</span>
+
+type Servicer interface {
+        CheckSQL(req ServiceCheckSQLRequest, res *ServiceCheckSQLResponse) error
+        RunSQL(req ServiceRunSQLRequest, res *ServiceRunSQLResponse) error
+        PingDB(req ServicePingDBRequest, res *ServicePingDBResponse) error
+        GetUUID() string
+        GetMSKeeper() *mskdriver.MSKeeper
+}
+
+type ServiceCheckSQLRequest struct {
+        MSID string        `json:"msid"`
+        SQL  string        `json:"sql"`
+        Args []interface{} `json:"args,omitempty"`
+}
+
+type ServiceCheckSQLResponse struct {
+        Request  ServiceCheckSQLRequest `json:"request,omitempty"`
+        Notifies []policy.PolicyError   `json:"notifies,omitempty"`
+}
+
+type ServiceRunSQLRequest struct {
+        MSID     string        `json:"msid"`
+        SQL      string        `json:"sql"`
+        Duration int64         `json:"duration"` // milliseconds
+        Args     []interface{} `json:"args,omitempty"`
+        Timeout  float64       `json:"timeout"`
+}
+
+type RunColumn struct {
+        Name     string `json:"name"`
+        DataType string `json:"type"`
+}
+
+type ServiceRunSQLResponse struct {
+        Request ServiceRunSQLRequest `json:"request,omitempty"`
+        Result  struct {
+                Columns      []RunColumn     `json:"columns,omitempty"`
+                Rows         [][]interface{} `json:"rows,omitempty"`
+                RowsAffected int64           `json:"rows_affected"`
+        }
+        Notifies []policy.PolicyError `json:"notifies,omitempty"`
+        MSID     string               `json:"msid"`
+        SQL      string               `json:"sql"`
+        Duration int64                `json:"duration"` // milliseconds
+        Args     []interface{}        `json:"args"`
+}
+
+type ServicePingDBRequest struct {
+        Timeout float64 `json:"timeout"` // milliseconds
+}
+
+type ServicePingDBResponse struct {
+        Request ServicePingDBRequest `json:"request,omitempty"`
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

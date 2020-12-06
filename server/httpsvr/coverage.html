@@ -1,0 +1,447 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/handlers.go (0.0%)</option>
+				
+				<option value="file1">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/iprange.go (100.0%)</option>
+				
+				<option value="file2">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/manager.go (0.0%)</option>
+				
+				<option value="file3">gitlab.papegames.com/fringe/mskeeper/server/httpsvr/retdata.go (0.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package httpsvr
+
+import (
+        "encoding/json"
+        "fmt"
+        "github.com/gin-gonic/gin"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+        "gitlab.papegames.com/fringe/mskeeper/server/service"
+        syslog "log"
+        "net/http"
+        "strconv"
+        "time"
+)
+
+type GinWrapper func(*gin.Context, http.ResponseWriter, *http.Request)
+
+// type HTTPWrapperGin struct {
+//         handle http.HandlerFunc
+// }
+
+// func NewHTTPWrapperGin(handle http.HandlerFunc) *HTTPWrapperGin {
+//         return &amp;HTTPWrapperGin{handle: handle}
+// }
+
+// func (httpwg *HTTPWrapperGin) HandleFunc(c *gin.Context) {
+//         httpwg.handle(c.Writer, c.Request)
+// }
+func NewHTTPWrapperGin(handle http.HandlerFunc) gin.HandlerFunc <span class="cov0" title="0">{
+        return func(c *gin.Context) </span><span class="cov0" title="0">{
+                handle(c.Writer, c.Request)
+        }</span>
+}
+
+func TickHandlerS(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        _, _ = w.Write([]byte(fmt.Sprintf(`
+server now: %v
+`, time.Now().Unix())))
+}</span>
+
+func NNWelcomeHandlerS(c *gin.Context) <span class="cov0" title="0">{
+        c.JSON(http.StatusOK, gin.H{"message": "welcome to papegames"})
+}</span>
+
+// @Title 初始化mskeeper的会话
+// @Description 通过dsn初始化mskeeper实例, dsn规则 https://www.cnblogs.com/diegodu/p/5586861.html
+// @Produce json
+// @Accept x-www-form-urlencoded
+// @Param session formData string false "mskeeper session"
+// @Param dsn formData string true "mysql dsn, eg. mskeeper_test:123456@tcp(192.168.0.86:3306)/mskeepertest?timeout=30s"
+// @Success 200 {object} RetData
+// @Router /mysql/init [post]
+func MySQLInitHandlerS(c *gin.Context) <span class="cov0" title="0">{
+        ret := NewRet()
+        defer c.JSON(http.StatusOK, ret)
+
+        sessionName := c.Request.FormValue("session") // 任意会话名字，用于生成UUID
+        dsn := c.Request.FormValue("dsn")             // mysql driver的dsn，用于生成UUID以及打开数据库
+
+        msservice, err := service.NewMySQLService(sessionName, dsn)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MySQLInitHandlerS(%v, %v): failed(%v) to init MySQL Service",
+                        sessionName, dsn, err)
+                ret.Error(RetErrFailToInitService, err.Error())
+                return
+        }</span>
+
+        <span class="cov0" title="0">syslog.Printf("dsn %v session %v err %v", dsn, sessionName, err)
+
+        ret.SetData("uuid", msservice.GetUUID())</span>
+}
+
+// @Title 检测SQL的安全性
+// @Description check sql through mskeeper
+// @Produce json
+// @Accept x-www-form-urlencoded
+// @Param uuid formData string true "Init API返回的UUID"
+// @Param sql formData string true "执行的SQL"
+// @Param dura formData int false "SQL执行的时间，单位：ms"
+// @Param args formData string false "SQL执行的参数，eg. [1,2,'333',4.44]"
+// @Success 200 {object} RetData
+// @Router /mysql/check [post]
+func MySQLCheckHandlerS(c *gin.Context) <span class="cov0" title="0">{
+        ret := NewRet()
+        defer c.JSON(http.StatusOK, ret)
+
+        msid := c.Request.FormValue("uuid")
+        sql := c.Request.FormValue("sql")
+        durastr := c.Request.FormValue("dura")
+        argstr := c.Request.FormValue("args")
+
+        var args []interface{}
+
+        err := json.Unmarshal([]byte(argstr), &amp;args)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v, %v): failed(%v) parse args %v",
+                        msid, sql, durastr, argstr, err, argstr)
+                ret.Error(RetErrArgs, err.Error())
+                return
+        }</span>
+        <span class="cov0" title="0">var dura int64
+        if durastr != "" </span><span class="cov0" title="0">{
+                dura, _ = strconv.ParseInt(durastr, 10, 64)
+        }</span>
+
+        <span class="cov0" title="0">sess, err := service.GetMSKSession(msid)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v, %v): failed(%v) to fetch MySQL Service",
+                        msid, sql, durastr, argstr, err)
+                ret.Error(RetErrFailToGetService, err.Error())
+                log.MSKLog().Error(ret.BuildResp())
+                return
+        }</span>
+        <span class="cov0" title="0">request := service.ServiceCheckSQLRequest{SQL: sql, MSID: msid, Duration: dura, Args: args}
+        response := &amp;service.ServiceCheckSQLResponse{Request: request}
+        err = sess.CheckSQL(request, response)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MySQLCheckHandlerS(%v, %v, %v, %v): failed(%v) check sql",
+                        msid, sql, durastr, argstr, err)
+                ret.Error(RetErrCheckFailure, err.Error())
+                return
+        }</span>
+
+        <span class="cov0" title="0">ret.SetData("request", response.Request)
+        ret.SetData("notifies", response.Notifies)</span>
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package httpsvr
+
+import (
+        "bytes"
+        "net"
+)
+
+//ipRange - a structure that holds the start and end of a range of ip addresses
+type ipRange struct {
+        start net.IP
+        end   net.IP
+}
+
+// inRange - check to see if a given ip address is within a range given
+func inRange(r ipRange, ipAddress net.IP) bool <span class="cov8" title="1">{
+        // strcmp type byte comparison
+        if bytes.Compare(ipAddress, r.start) &gt;= 0 &amp;&amp; bytes.Compare(ipAddress, r.end) &lt; 0 </span><span class="cov8" title="1">{
+                return true
+        }</span>
+        <span class="cov8" title="1">return false</span>
+}
+
+var privateRanges = []ipRange{
+        {
+                start: net.ParseIP("10.0.0.0"),
+                end:   net.ParseIP("10.255.255.255"),
+        },
+        {
+                start: net.ParseIP("100.64.0.0"),
+                end:   net.ParseIP("100.127.255.255"),
+        },
+        {
+                start: net.ParseIP("172.16.0.0"),
+                end:   net.ParseIP("172.31.255.255"),
+        },
+        {
+                start: net.ParseIP("192.0.0.0"),
+                end:   net.ParseIP("192.0.0.255"),
+        },
+        {
+                start: net.ParseIP("192.168.0.0"),
+                end:   net.ParseIP("192.168.255.255"),
+        },
+        {
+                start: net.ParseIP("198.18.0.0"),
+                end:   net.ParseIP("198.19.255.255"),
+        },
+}
+
+// isPrivateSubnet - check to see if this ip is in a private subnet
+func isPrivateSubnet(ipAddress net.IP) bool <span class="cov8" title="1">{
+        // my use case is only concerned with ipv4 atm
+        if ipCheck := ipAddress.To4(); ipCheck != nil </span><span class="cov8" title="1">{
+                // iterate over all our ranges
+                for _, r := range privateRanges </span><span class="cov8" title="1">{
+                        // check if this ip is in a private range
+                        if inRange(r, ipAddress) </span><span class="cov8" title="1">{
+                                return true
+                        }</span>
+                }
+        }
+        <span class="cov8" title="1">return false</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package httpsvr
+
+import (
+        "github.com/gin-gonic/gin"
+        "github.com/swaggo/gin-swagger"
+        "github.com/swaggo/gin-swagger/swaggerFiles"
+        _ "gitlab.papegames.com/fringe/mskeeper/server/docs"
+        "net/http"
+        "net/http/pprof"
+)
+
+// 注册 HTTPS handler
+func RegisterHTTPSHandler() *gin.Engine <span class="cov0" title="0">{
+
+        gin.SetMode(gin.ReleaseMode)
+
+        router := gin.Default()
+
+        debug := router.Group("/debug")
+        </span><span class="cov0" title="0">{
+                debug.GET("/pprof", NewHTTPWrapperGin(pprof.Index))
+                debug.POST("/tick", NewHTTPWrapperGin(TickHandlerS))
+        }</span>
+
+        <span class="cov0" title="0">v1 := router.Group("/v1")
+        </span><span class="cov0" title="0">{
+                v1.POST("/mysql/init", MySQLInitHandlerS)
+                v1.POST("/mysql/check", MySQLCheckHandlerS)
+        }</span>
+
+        // 文档界面访问URL
+        <span class="cov0" title="0">router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+        router.GET("/", func(c *gin.Context) </span><span class="cov0" title="0">{
+                // 指定重定向的URL 通过HandleContext进行重定向到test2 页面显示json数据
+                c.Redirect(http.StatusMovedPermanently, "/swagger/index.html")
+        }</span>)
+
+        <span class="cov0" title="0">return router</span>
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package httpsvr
+
+import (
+        "encoding/json"
+        "gitlab.papegames.com/fringe/mskeeper/server/service"
+        "log"
+        "time"
+)
+
+const (
+        RetSuccess = 0
+
+        RetErrCommon            = 1000 // 通用错误
+        RetErrServerTimeout     = 1001 // 服务器处理超时（一般会处理完成、必要情况下需要rollback处理）
+        RetErrFailToInitService = 1002 // mskeeper服务初始化失败
+        RetErrFailToGetService  = 1003 // mskeeper服务获取失败
+        RetErrCheckFailure      = 1004 // sql检测异常
+        RetErrArgs              = 1005 // 参数错误
+)
+
+type RetModel map[string]interface{}
+
+type RetData struct {
+        Data RetModel `json:"data,omitempty"`
+        Ret  uint32   `json:"ret"`
+        Msg  string   `json:"msg,omitempty"`
+        Time int64    `json:"time"`
+}
+
+func NewRet() *RetData <span class="cov0" title="0">{
+        return &amp;RetData{
+                Ret:  RetSuccess,
+                Time: time.Now().Unix(),
+                Data: make(RetModel),
+        }
+}</span>
+
+func (rd *RetData) BuildResp() map[string]interface{} <span class="cov0" title="0">{
+        ret := make(map[string]interface{})
+
+        ret["ret"] = rd.Ret
+        ret["msg"] = rd.Msg
+        ret["time"] = rd.Time
+        ret["data"] = rd.Data
+
+        return ret
+}</span>
+
+func (r *RetData) SetData(key string, value interface{}) <span class="cov0" title="0">{
+        r.Data[key] = value
+}</span>
+
+func (r *RetData) Error(ret uint32, msg string) <span class="cov0" title="0">{
+        log.Printf("r %v on Error", r)
+        r.Ret = ret
+        r.Msg = msg
+}</span>
+
+func (r *RetData) CommonError() <span class="cov0" title="0">{
+        r.Ret = RetErrCommon
+        r.Msg = "unknown error"
+}</span>
+
+func (r *RetData) Success() <span class="cov0" title="0">{
+        r.Ret = RetSuccess
+        r.Msg = "success"
+}</span>
+
+func ServerTimeoutRet() string <span class="cov0" title="0">{
+        nret := NewRet()
+        nret.Error(RetErrServerTimeout, service.Tr("en", "server_timeout"))
+        return string(nret.json())
+}</span>
+
+// func (r *RetData) Writer(req *http.Request, w http.ResponseWriter, now time.Time) error {
+
+//         w.Header().Set("Access-Control-Allow-Origin", "*")
+//         w.Header().Set("Content-Type", "application/json")
+
+//         var werr error
+//         var wn int
+//         // 调试输出的时候，一行显示
+//         rawstr := r.json()
+//         switch r.Model {
+//         case "json":
+//                 wn, werr = w.Write(rawstr)
+//         default:
+//                 wn, werr = w.Write(rawstr)
+//         }
+
+//         remoteIP := util.GetHTTPRemoteIPNew(req)
+//         st, ok := r.Data["time"]
+//         if ok {
+//                 start := st.(int64)
+//                 logger.Notic("[%s]get_url:%s, form:%v (time:%.2f ms, agent:%v, ret:%v, st:%v, werr:%v, wn:%v)",
+//                         remoteIP, req.URL.String(), req.PostForm, time.Since(now).Seconds()*1000, req.UserAgent(), string(rawstr), start, werr, wn)
+//         }
+
+//         return werr
+// }
+
+func (r *RetData) json() []byte <span class="cov0" title="0">{
+        js, _ := json.Marshal(&amp;r.Data)
+        return js
+}</span>
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

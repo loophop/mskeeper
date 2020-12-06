@@ -1,0 +1,8 @@
+time="2020-05-23T02:13:47+08:00" level=info msg="[policy_code=ErrPolicyCodeSafe,policy_msg=safe sql, rows_affected:10 cost:0.0454ms]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:13:56+08:00" level=info msg="[policy_code=ErrPolicyCodeSafe,policy_msg=safe sql, rows_affected:10 cost:1e+03ms]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:13:56+08:00" level=info msg="[policy_code=ErrPolicyCodeSafe,policy_msg=safe sql, rows_affected:10 cost:1e+03ms]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:13:57+08:00" level=info msg="[policy_code=ErrPolicyCodeSafe,policy_msg=safe sql, rows_affected:10 cost:1e+03ms]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:14:01+08:00" level=error msg="[policy_code=ErrPolicyCodeExeCost,policy_msg=Too much time spent in execution sql: cost(6e+03ms) > msqlsg.opts.MaxExecTime(5s)]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:14:01+08:00" level=error msg="[policy_code=ErrPolicyCodeExeCost,policy_msg=Too much time spent in execution sql: cost(6e+03ms) > msqlsg.opts.MaxExecTime(5s)]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:14:02+08:00" level=error msg="[policy_code=ErrPolicyCodeExeCost,policy_msg=Too much time spent in execution sql: cost(6e+03ms) > msqlsg.opts.MaxExecTime(5s)]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"
+time="2020-05-23T02:14:02+08:00" level=error msg="[policy_code=ErrPolicyCodeExeCost,policy_msg=Too much time spent in execution sql: cost(6e+03ms) > msqlsg.opts.MaxExecTime(5s)]" PARAM="[[[[1]]]]" SQL="select * from test where value = ?"

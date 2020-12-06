@@ -1,0 +1,1299 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">gitlab.papegames.com/fringe/mskeeper/policy/policy_checker.go (49.5%)</option>
+				
+				<option value="file1">gitlab.papegames.com/fringe/mskeeper/policy/policy_checker_fields_length.go (55.3%)</option>
+				
+				<option value="file2">gitlab.papegames.com/fringe/mskeeper/policy/policy_checker_fields_type.go (0.0%)</option>
+				
+				<option value="file3">gitlab.papegames.com/fringe/mskeeper/policy/policy_checker_rows_absolute.go (0.0%)</option>
+				
+				<option value="file4">gitlab.papegames.com/fringe/mskeeper/policy/policy_checker_rows_involved.go (0.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package policy
+
+import (
+        // "bytes"
+        "context"
+        "database/sql"
+        "fmt"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+        "gitlab.papegames.com/fringe/mskeeper/misc"
+        // syslog "log"
+        "regexp"
+        "strconv"
+        "strings"
+        "time"
+)
+
+/*
+策略：
+前置：
+1. 操作影响的行数 &gt; 1/3 总行数（count(1))
+2. 行数 rows &gt; 1w
+
+*/
+
+// REF
+// MySQL Doc: 8.0https://dev.mysql.com/doc/refman/8.0/en/explain-output.html
+//       all: https://dev.mysql.com/doc/refman/5.5/en/alter-table-online-operations.html
+// 中文解释:   https://www.cnblogs.com/danhuangpai/p/8475458.html
+/*
+
+SIMPLE
+explain insert into test select * from test where test.value in (select value from test)
+
+SUBQUERY
+explain insert into test select * from test where test.id = (select id from test limit 1)
+
+UNION
+UNION RESULT
+explain
+select * from test where test.value_str = '111'
+union
+select * from test where test.value_str = '222';
+
+DEPENDENT SUBQUERY
+explain select * from test t1 where t1.value = (select id from test t2 where t2.value = t1.value limit 1)
+
+DERIVED (5.7+中优化去掉了部分)
+explain select * from (select * from test) b;
+
+MATERIALIZED
+
+UNCACHEABLE SUBQUERY
+UNCACHEABLE UNION
+
+关于filtered字段
+filtered (JSON name: filtered)
+
+The filtered column indicates an estimated percentage of table rows that will be filtered by the table condition.
+The maximum value is 100, which means no filtering of rows occurred. Values decreasing from 100 indicate _
+increasing amounts of filtering.
+rows shows the estimated number of rows examined and rows × filtered shows the number of rows that will be joined _
+with the following table. For example, if rows is 1000 and filtered is 50.00 (50%),
+the number of rows to be joined with the following table is 1000 × 50% = 500.
+
+5.5和5.7在同样类型不匹配的情况下，表现并不一样。
+
+explain extended select * from test_policy where value = 72
+5.7
+1        SIMPLE        test_policy        NULL        ALL        NULL        NULL        NULL        NULL        10157        10.00        Using where
+
+5.5
+1        SIMPLE        test_policy        ALL        NULL        NULL        NULL        NULL        10443        100.00        Using where
+
+目测是做了优化。例如, 对于类型不匹配（value1 is varchar[6]），5.7查询效率filtered = 10, 是5.5的十倍
+select * from test where value1 = 5
+
+*/
+
+var (
+        supportExtended bool = true // true表示支持 explain extended语法，8.0以上不支持
+
+        delayVersion bool = false // 表示已经获取了mysql的版本，假设一个包只有一个版本的MySQL（假设很强吗？）
+
+        notSupportContext bool = false // true表示当前mysql版本（5.7.X）在context的事务处理方面存在bug
+
+        notSupportExplainInsert bool = false // true表示当前mysql版本 (5.5.x) 不支持explain insert 语句
+
+        tableNameReg = regexp.MustCompile(`&lt;.*?&gt;`)
+
+        // mysql的 context 超时被取消之后，可能会死锁。这里的时间大一些。
+        // 避开 5.7.25版本
+        MaxTimeoutOfExplain = 3 * time.Second
+)
+
+type PolicyCode int
+
+var (
+        ErrExplainRowsFormatErr = fmt.Errorf("rows field is invalid")
+)
+
+const (
+        ErrPolicyCodeSafe          PolicyCode = 5200
+        ErrPolicyCodeExeCost       PolicyCode = 5201
+        ErrPolicyCodeRowsAbs       PolicyCode = 5202
+        ErrPolicyCodeRowsInvolve   PolicyCode = 5203
+        ErrPolicyCodeAllTableScan  PolicyCode = 5204
+        ErrPolicyCodeDataTruncate  PolicyCode = 5205
+        WarnPolicyCodeDataTruncate PolicyCode = 5206
+)
+
+func (pl PolicyCode) String() string <span class="cov8" title="1">{
+        switch pl </span>{
+        case ErrPolicyCodeSafe:<span class="cov0" title="0">
+                return "ErrPolicyCodeSafe"</span>
+        case ErrPolicyCodeExeCost:<span class="cov0" title="0">
+                return "ErrPolicyCodeExeCost"</span>
+        case ErrPolicyCodeRowsAbs:<span class="cov0" title="0">
+                return "ErrPolicyCodeRowsAbs"</span>
+        case ErrPolicyCodeRowsInvolve:<span class="cov0" title="0">
+                return "ErrPolicyCodeRowsInvolve"</span>
+        case ErrPolicyCodeAllTableScan:<span class="cov0" title="0">
+                return "ErrPolicyCodeAllTableScan"</span>
+        case ErrPolicyCodeDataTruncate:<span class="cov8" title="1">
+                return "ErrPolicyCodeDataTruncate"</span>
+        case WarnPolicyCodeDataTruncate:<span class="cov8" title="1">
+                return "WarnPolicyCodeDataTruncate"</span>
+        default:<span class="cov0" title="0">
+                str := strconv.Itoa(int(pl))
+                return str</span>
+        }
+}
+
+type PolicyError struct {
+        Code PolicyCode `json:"code"`
+        Msg  string     `json:"msg"`
+}
+
+func NewPolicyErrorSafe(rowsAffected int, cost time.Duration) *PolicyError <span class="cov0" title="0">{
+        return &amp;PolicyError{Code: ErrPolicyCodeSafe,
+                Msg: fmt.Sprintf("safe sql, rows_affected:%v cost:%0.3vms", rowsAffected, float64(cost.Nanoseconds())/float64(1000000))}
+}</span>
+
+func NewPolicyError(code PolicyCode, msg string) *PolicyError <span class="cov8" title="1">{
+        return &amp;PolicyError{Code: code, Msg: msg}
+}</span>
+
+func (err *PolicyError) Error() string <span class="cov8" title="1">{
+        return fmt.Sprintf("[policy_code=%v,policy_msg=%v]", err.Code, err.Msg)
+}</span>
+
+type PolicyChecker interface {
+        Check(db *sql.DB, er []ExplainRecord, query string, args []interface{}) error
+}
+
+type ExplainRecord struct {
+        ID           sql.NullString
+        SelectType   sql.NullString
+        Table        sql.NullString
+        Partitions   sql.NullString
+        Type         sql.NullString
+        PossibleKeys sql.NullString
+        Key          sql.NullString
+        KeyLen       sql.NullString
+        Ref          sql.NullString
+        Rows         sql.NullString
+        Filtered     sql.NullString
+        Extra        sql.NullString
+}
+
+// 根据 filtered 和 rows 的比例, 获取真正受影响的行数
+func (er *ExplainRecord) GetExplainRealRows() (int, error) <span class="cov0" title="0">{
+
+        if !er.Rows.Valid </span><span class="cov0" title="0">{
+                return 0, ErrExplainRowsFormatErr
+        }</span> else<span class="cov0" title="0"> {
+                rowCnt, _ := strconv.Atoi(er.Rows.String)
+                var rate float64 = 100.0
+                if er.Filtered.Valid </span><span class="cov0" title="0">{
+                        rate, _ = strconv.ParseFloat(er.Filtered.String, 64)
+                }</span>
+                <span class="cov0" title="0">realRowCnt := int(float64(rowCnt) * (rate / float64(100.0)))
+                // syslog.Printf("GetExplainRealRows: rate %v, rowCnt %v realRowCnt %v", rate, rowCnt, realRowCnt)
+                log.MSKLog().Debugf("GetExplainRealRows: rate %v, rowCnt %v realRowCnt %v", rate, rowCnt, realRowCnt)
+                return realRowCnt, nil</span>
+        }
+}
+
+func NewExplainRecord() *ExplainRecord <span class="cov8" title="1">{
+        return &amp;ExplainRecord{}
+}</span>
+
+// func MakeExplainRecords(db *sql.DB, query string, args ...interface{}) ([]ExplainRecord, error) {
+//         explainRecords := []ExplainRecord{}
+
+//         //        originQuery := query
+//         query = "explain " + query
+
+//         rows, err := db.Query(query, args...)
+//         if err != nil {
+//                 return explainRecords, err
+//         }
+//         defer rows.Close()
+
+//         explainRecords, err = genExplainRecordsFromRows(rows)
+//         if err != nil {
+//                 // log.Printf("MakeExplainRecords(%v, %v) GenExplainRecordsFromRows failed %v", query, args, err)
+//                 return explainRecords, err
+//         }
+//         //log.Printf("MakeExplainRecords %v on origin query %v", explainRecords, originQuery)
+//         return explainRecords, nil
+// }
+
+func safeRollback(memo string, tx *sql.Tx) error <span class="cov8" title="1">{
+        err := tx.Rollback()
+        if err != sql.ErrTxDone &amp;&amp; err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("safeRollback(%v) rollback failed %v",
+                        memo, err)
+                return err
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// !!!!!!!!!!!!!!!!!!!
+// mysql 5.7.25 实测，偶发的会出现死亡deadlock：
+// show 不出来线程,
+// BeginTx、QueryContext的时候不能通过ctx取消!!!!!否则会出现Begin了的事务无法结束，锁住整个表
+func MakeExplainRecords(db *sql.DB, query string, timeout time.Duration, args []interface{}) ([]ExplainRecord, error) <span class="cov8" title="1">{
+        explainRecords := []ExplainRecord{}
+
+        ctx, cancel := context.WithCancel(context.Background())
+        // 针对 mysql 5.7.x 版本在context方面的bug，workaround
+        if notSupportContext </span><span class="cov0" title="0">{
+                timeout = timeout * 100
+        }</span>
+        <span class="cov8" title="1">defer time.AfterFunc(timeout, cancel).Stop()
+
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MakeExplainRecords(%v, %v) BeginTx failed %v", query, args, err)
+                return explainRecords, err
+        }</span>
+        <span class="cov8" title="1">defer func() </span><span class="cov8" title="1">{
+                _ = safeRollback(fmt.Sprintf("MakeExplainRecords() query of %v rollback", query), tx)
+        }</span>()
+
+        <span class="cov8" title="1">if !delayVersion </span><span class="cov8" title="1">{
+                supportExtended = true
+                versionQuery := "SELECT version();"
+                row := tx.QueryRowContext(ctx, versionQuery)
+                var version string
+                if err := row.Scan(&amp;version); err != nil </span><span class="cov0" title="0">{
+                        log.MSKLog().Errorf("MakeExplainRecords(%v, %v) QueryRowContext failed %v", query, args, err)
+                        return explainRecords, err
+                }</span>
+
+                <span class="cov8" title="1">vs := strings.Split(version, ".")
+                if len(vs) &gt;= 1 &amp;&amp; vs[0] == "8" </span><span class="cov8" title="1">{ // mysql 8.0.x+
+                        supportExtended = false
+                }</span>
+                <span class="cov8" title="1">if len(vs) &gt;= 2 &amp;&amp; vs[0] == "5" &amp;&amp; vs[1] == "7" </span><span class="cov0" title="0">{ // mysql 5.7.x+
+                        notSupportContext = true
+                }</span>
+                <span class="cov8" title="1">if len(vs) &gt;= 2 &amp;&amp; vs[0] == "5" &amp;&amp; vs[1] == "5" </span><span class="cov0" title="0">{
+                        notSupportExplainInsert = true
+                }</span>
+                <span class="cov8" title="1">delayVersion = true</span>
+        }
+        // 已知 mysql 8.0 不支持 explain 的 extended关键字！！！！！
+        <span class="cov8" title="1">if supportExtended </span><span class="cov0" title="0">{
+                query = "explain extended " + query
+        }</span> else<span class="cov8" title="1"> {
+                query = "explain " + query
+        }</span>
+
+        // 已知 mysql 5.5 不支持 explain insert select 句式，过滤insert
+        <span class="cov8" title="1">if notSupportExplainInsert </span><span class="cov0" title="0">{
+                query = misc.FilterInnerSelectFor55Minus(query)
+        }</span>
+
+        <span class="cov8" title="1">rows, err := tx.QueryContext(ctx, query, args...)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MakeExplainRecords(%v, %v) QueryContext failed %v", query, args, err)
+                return explainRecords, err
+        }</span>
+        <span class="cov8" title="1">defer rows.Close()
+
+        explainRecords, err = genExplainRecordsFromRows(rows)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MakeExplainRecords(%v, %v) GenExplainRecordsFromRows failed %v", query, args, err)
+                return explainRecords, err
+        }</span>
+
+        <span class="cov8" title="1">err = tx.Commit()
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Errorf("MakeExplainRecords(%v, %v) Commit failed %v", query, args, err)
+                return explainRecords, err
+        }</span>
+        //log.Printf("MakeExplainRecords %v on origin query %v", explainRecords, originQuery)
+        <span class="cov8" title="1">return explainRecords, nil</span>
+}
+
+func genExplainRecordsFromRows(rows *sql.Rows) ([]ExplainRecord, error) <span class="cov8" title="1">{
+        records := make([]ExplainRecord, 0)
+        columns, _ := rows.Columns()
+
+        for rows.Next() </span><span class="cov8" title="1">{
+                record := NewExplainRecord()
+                // mysql 5.5-, 5.6
+                if len(columns) == 11 </span><span class="cov0" title="0">{
+                        if err := rows.Scan(
+                                &amp;record.ID, &amp;record.SelectType, &amp;record.Table, &amp;record.Type, &amp;record.PossibleKeys,
+                                &amp;record.Key, &amp;record.KeyLen, &amp;record.Ref, &amp;record.Rows, &amp;record.Filtered, &amp;record.Extra); err != nil </span><span class="cov0" title="0">{
+                                log.MSKLog().Warnf("GenExplainRecordsFromRows(%v) failed %v", rows, err)
+                                return records, err
+                        }</span>
+                } else<span class="cov8" title="1"> {
+                        // mysql 5.7,8.0+
+                        if err := rows.Scan(
+                                &amp;record.ID, &amp;record.SelectType, &amp;record.Table, &amp;record.Partitions, &amp;record.Type,
+                                &amp;record.PossibleKeys, &amp;record.Key, &amp;record.KeyLen, &amp;record.Ref, &amp;record.Rows, &amp;record.Filtered, &amp;record.Extra); err != nil </span><span class="cov0" title="0">{
+                                log.MSKLog().Warnf("GenExplainRecordsFromRows(%v) failed %v", rows, err)
+                                return records, err
+                        }</span>
+                }
+
+                <span class="cov8" title="1">records = append(records, *record)</span>
+                //log.Printf("GenExplainRecords(%+v)", record)
+        }
+        <span class="cov8" title="1">return records, nil</span>
+}
+
+func MaxRowsFromExplainRecords(explainRecords []ExplainRecord) int <span class="cov0" title="0">{
+        maxRows := 0
+        for i := 0; i &lt; len(explainRecords); i++ </span><span class="cov0" title="0">{
+                rowCnt, _ := strconv.Atoi(explainRecords[i].Rows.String)
+                if maxRows &lt; rowCnt </span><span class="cov0" title="0">{
+                        maxRows = rowCnt
+                }</span>
+        }
+        <span class="cov0" title="0">return maxRows</span>
+}
+
+func isTableName(tn string) bool <span class="cov0" title="0">{
+
+        if len(strings.TrimSpace(tn)) &lt;= 0 </span><span class="cov0" title="0">{
+                return false
+        }</span>
+        //返回匹配到的结果
+        <span class="cov0" title="0">result := tableNameReg.FindStringSubmatch(tn)
+        // log.Printf("isTableName(%v): result %v", tn, result)
+
+        return len(result) &lt;= 0</span>
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package policy
+
+import (
+        "context"
+        "database/sql"
+        "fmt"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+        "gitlab.papegames.com/fringe/mskeeper/misc"
+        "gitlab.papegames.com/fringe/mskeeper/sqlparser"
+        "gitlab.papegames.com/fringe/mskeeper/sqlparser/dependency/sqltypes"
+        // syslog "log"
+        "time"
+        // "math/big"
+        // "reflect"
+        "strconv"
+        "strings"
+)
+
+/*
+
+操作数长度检测策略，对应varchar，text，int等的长度检测。
+
+背景：
+通过 SELECT @@GLOBAL.sql_mode;命令，可以查询MySQL长度硬检测的开关是否打开。
+如果包含"STRICT_TRANS_TABLES", 则数据过长是会即时返回错误。
+本地的话，5.5没开，5.6、5.7以及8.0的都开了
+可通过 set @@global.sql_mode=""; 来关闭严格检查。
+
+
+调查了阿里云和腾讯云，
+
+1. SDK的阿里云，都没开
+2. 腾讯云，恋与的部分开了严格，部分又木有。
+3. JAVA的JDBC貌似支持i，https://book.51cto.com/art/201008/219125.htm
+4. MySQL各种数据类型的操作示例，https://www.cnblogs.com/qq631243523/p/9791393.html
+
+*/
+
+var (
+        ErrFieldDataTruncated     = fmt.Errorf("Data truncated")
+        ErrExprToSQLValueFail     = fmt.Errorf("Expr to sqlval failure")
+        WarnFieldDataMayTruncated = fmt.Errorf("Data might be truncated in future")
+        DataTruncationUplimit     = 0.8
+)
+
+const (
+        NoTruncated   int = 0
+        TruncatedWarn int = 1
+        Truncated     int = 2
+)
+
+type ColumnMap map[string]*ColumnRecord
+
+// func (cm ColumnMap) String() string {
+//         str := "ColumnMap "
+//         for k, v := range cm {
+//                 str += fmt.Sprintf("(k:%v,v:%v) ", k, v)
+//         }
+//         return str
+// }
+
+type ColumnRecord struct {
+        Field sql.NullString
+        Type  sql.NullString
+        // Key
+        // Default
+        // Extra
+}
+
+func NewColumnRecord() *ColumnRecord <span class="cov8" title="1">{
+        return &amp;ColumnRecord{}
+}</span>
+
+func MakeColumnRecords(db *sql.DB, table string, timeout time.Duration) (map[string]*ColumnRecord, []ColumnRecord, error) <span class="cov8" title="1">{
+
+        ctx, cancel := context.WithCancel(context.Background())
+
+        // 针对 mysql 5.7.x 版本在context方面的bug，workaround
+        if notSupportContext </span><span class="cov0" title="0">{
+                timeout = timeout * 100
+        }</span>
+
+        <span class="cov8" title="1">defer time.AfterFunc(timeout, cancel).Stop()
+        // ctx, cancel := context.WithTimeout(context.Background(), timeout)
+        // defer cancel()
+
+        //        originQuery := query
+        columnsMap := ColumnMap{}
+        var columnRecords []ColumnRecord
+        query := "show columns from " + table
+
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil </span><span class="cov0" title="0">{
+                return columnsMap, columnRecords, err
+        }</span>
+        <span class="cov8" title="1">defer func() </span><span class="cov8" title="1">{
+                _ = safeRollback(fmt.Sprintf("MakeColumnRecords() query of %v rollback", query), tx)
+        }</span>()
+
+        <span class="cov8" title="1">rows, err := tx.QueryContext(ctx, query)
+        if err != nil </span><span class="cov8" title="1">{
+                return columnsMap, columnRecords, err
+        }</span>
+        <span class="cov8" title="1">defer rows.Close()
+
+        columnRecords, err = genColumnRecordsFromRows(rows)
+        if err != nil </span><span class="cov0" title="0">{
+                return columnsMap, columnRecords, err
+        }</span>
+
+        <span class="cov8" title="1">err = tx.Commit()
+        if err != nil </span><span class="cov0" title="0">{
+                return columnsMap, columnRecords, err
+        }</span>
+
+        <span class="cov8" title="1">for i := 0; i &lt; len(columnRecords); i++ </span><span class="cov8" title="1">{
+                if columnRecords[i].Field.Valid </span><span class="cov8" title="1">{
+                        columnsMap[columnRecords[i].Field.String] = &amp;columnRecords[i]
+                }</span>
+        }
+        <span class="cov8" title="1">return columnsMap, columnRecords, nil</span>
+
+}
+
+// 计算一段SQL表达式的值，by select 语句
+func calExprValue(db *sql.DB, timeout time.Duration, expr string, args ...interface{}) (*sqlparser.SQLVal, error) <span class="cov0" title="0">{
+        //  InterfaceToValue
+        //  ExprFromValue
+
+        var sqlval *sqlparser.SQLVal
+        ctx, cancel := context.WithCancel(context.Background())
+
+        // 针对 mysql 5.7.x 版本在context方面的bug，workaround
+        if notSupportContext </span><span class="cov0" title="0">{
+                timeout = timeout * 100
+        }</span>
+        <span class="cov0" title="0">defer time.AfterFunc(timeout, cancel).Stop()
+
+        query := "SELECT (" + expr + ")"
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil </span><span class="cov0" title="0">{
+                return sqlval, err
+        }</span>
+        <span class="cov0" title="0">defer func() </span><span class="cov0" title="0">{
+                _ = safeRollback(fmt.Sprintf("calExprValue() query of %v rollback", query), tx)
+        }</span>()
+
+        <span class="cov0" title="0">var dest interface{}
+        err = tx.QueryRowContext(ctx, query, args...).Scan(&amp;dest)
+        if err != nil </span><span class="cov0" title="0">{
+                return sqlval, err
+        }</span>
+        <span class="cov0" title="0">err = tx.Commit()
+        if err != nil </span><span class="cov0" title="0">{
+                return sqlval, err
+        }</span>
+
+        <span class="cov0" title="0">typeval, _ := sqltypes.InterfaceToValue(dest)
+        parserExpr, _ := sqlparser.ExprFromValue(typeval)
+        sv, ok := parserExpr.(*sqlparser.SQLVal)
+        if !ok </span><span class="cov0" title="0">{
+                return sqlval, ErrExprToSQLValueFail
+        }</span>
+        <span class="cov0" title="0">sqlval = sv
+        log.MSKLog().Infof("calExprValue(%v, %v, %v, %v) got sqlval %v", db, timeout, expr, args, sqlval)
+        return sqlval, nil</span>
+}
+
+func genColumnRecordsFromRows(rows *sql.Rows) ([]ColumnRecord, error) <span class="cov8" title="1">{
+        records := make([]ColumnRecord, 0)
+
+        for rows.Next() </span><span class="cov8" title="1">{
+                record := NewColumnRecord()
+                var noCare1, noCare2, noCare3, noCare4 sql.NullString
+                if err := rows.Scan(
+                        &amp;record.Field,
+                        &amp;record.Type,
+                        &amp;noCare1, &amp;noCare2, &amp;noCare3, &amp;noCare4); err != nil </span><span class="cov0" title="0">{
+                        log.MSKLog().Warnf("genColumnRecordsFromRows(%v) failed %v", rows, err)
+                        return records, err
+                }</span>
+                <span class="cov8" title="1">if !record.Field.Valid || !record.Type.Valid </span><span class="cov0" title="0">{
+                        log.MSKLog().Warnf("genColumnRecordsFromRows(%v) invalid of record field %v", rows, record)
+                        continue</span>
+                }
+                <span class="cov8" title="1">record.Field.String = strings.ToUpper(record.Field.String)
+                records = append(records, *record)</span>
+        }
+        <span class="cov8" title="1">return records, nil</span>
+}
+
+type PolicyCheckerFieldsLength struct {
+        uplimit float64
+}
+
+func NewPolicyCheckerFieldsLength(uplimits ...interface{}) *PolicyCheckerFieldsLength <span class="cov8" title="1">{
+
+        uplimit := DataTruncationUplimit
+        // Parse uplimit
+        for i := 0; i &lt; len(uplimits); i++ </span><span class="cov0" title="0">{
+                u, ok := uplimits[i].(float64)
+                if ok &amp;&amp; u &lt; 1.000000001 </span><span class="cov0" title="0">{
+                        uplimit = u
+                        break</span>
+                }
+        }
+        <span class="cov8" title="1">return &amp;PolicyCheckerFieldsLength{uplimit: uplimit}</span>
+}
+
+//    REF: https://dev.mysql.com/doc/refman/5.6/en/integer-types.html
+//    MySQL Integer Type:
+//    Type:            TINYINT(), SMALLINT,  MEDIUMINT,      INT,     BIGINT
+//    Max:                255        65535    16777215  4294967295    2^64-1
+//    Min(signed):       -128        -32768   -8388608  -2147483648   -2^63
+
+//    MySQL type representation:
+//    T(length) [unsigned]
+//    T is in (tinyint, SMALLINT, MEDIUMINT, INT, BIGINT)
+//    length is work when zerofill was set, none bussiness with it's value.
+func calNumberOfBitsByFieldTypeInt(fieldType string) int <span class="cov0" title="0">{
+        switch fieldType </span>{
+        case msFieldTypeTiny:<span class="cov0" title="0">
+                return 8</span>
+        case msFieldTypeShort:<span class="cov0" title="0">
+                return 16</span>
+        case msFieldTypeInt24:<span class="cov0" title="0">
+                return 24</span>
+        case msFieldTypeLong:<span class="cov0" title="0">
+                return 32</span>
+        case msFieldTypeLongLong:<span class="cov0" title="0">
+                return 64</span>
+        // no ban no sure
+        default:<span class="cov0" title="0">
+                return 64</span>
+        }
+}
+
+// 对于Update语句支持的三类table：AliasedTable, (AliasedTable) 和 (AliasedTable join AliasedTable)
+// 只试图返回前两种， 暂时不支持join, eg. update test_policy join test on test_policy.value1 = test.value1 set test_policy.value = '123';
+func getAliasedTableFromUpdateStmt(tb sqlparser.TableExpr) *sqlparser.AliasedTableExpr <span class="cov8" title="1">{
+
+        aliaTable, ok := tb.(*sqlparser.AliasedTableExpr)
+        if ok </span><span class="cov8" title="1">{
+                return aliaTable
+        }</span>
+
+        <span class="cov8" title="1">pTable, ok := tb.(*sqlparser.ParenTableExpr)
+        if !ok </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+
+        // TODO：暂时不支持 update (table1, table2)..., 只支持 update (table1), (table2)...
+        <span class="cov8" title="1">if len(pTable.Exprs) &gt; 1 || len(pTable.Exprs) &lt; 1 </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+        <span class="cov8" title="1">aliaTable, ok = pTable.Exprs[0].(*sqlparser.AliasedTableExpr)
+        if ok </span><span class="cov8" title="1">{
+                return aliaTable
+        }</span>
+
+        <span class="cov8" title="1">pTable, ok = pTable.Exprs[0].(*sqlparser.ParenTableExpr)
+        if ok </span><span class="cov8" title="1">{
+                return getAliasedTableFromUpdateStmt(pTable)
+        }</span>
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+//    REF:https://dev.mysql.com/doc/refman/5.6/en/string-types.html
+func calNumberOfBytesByFieldTypeValue(fieldType string, parenthesisLength int64) int64 <span class="cov8" title="1">{
+
+        switch fieldType </span>{
+        case msFieldTypeBinary:<span class="cov0" title="0">
+                return parenthesisLength</span>
+        case msFieldTypeVarBinary:<span class="cov0" title="0">
+                return parenthesisLength</span>
+        case msFieldTypeString:<span class="cov0" title="0">
+                return parenthesisLength</span>
+        case msFieldTypeVarString:<span class="cov8" title="1">
+                return parenthesisLength</span>
+        case msFieldTypeTinyBLOB, msFieldTypeTinyTEXT:<span class="cov0" title="0">
+                return 255</span>
+        case msFieldTypeBLOB, msFieldTypeTEXT:<span class="cov0" title="0">
+                return 65535</span>
+        case msFieldTypeMediumBLOB, msFieldTypeMediumTEXT:<span class="cov0" title="0">
+                return 16777215</span>
+        case msFieldTypeLongBLOB, msFieldTypeLongTEXT:<span class="cov0" title="0">
+                return 4294967295</span>
+        // no ban no sure
+        default:<span class="cov0" title="0">
+                return 4294967295</span>
+        }
+}
+
+// Check if value was truncated by the definition of cr
+// eg. value = 'abcdefg', cr.Type.String = varchar(5)  ==&gt; data in db: 'abcde' was truncated
+func (pcri *PolicyCheckerFieldsLength) checkIfMySQLTruncate(cr *ColumnRecord, sqlV *sqlparser.SQLVal, value []byte) int <span class="cov8" title="1">{
+        if sqlV == nil </span><span class="cov0" title="0">{
+                log.MSKLog().Debugf("checkIfMySQLTruncate:Check(%v, %v, %v) nil of sqlV, possiblely FuncExpr",
+                        cr, sqlV, value)
+                return NoTruncated
+        }</span>
+        <span class="cov8" title="1">msFieldType := strings.Split(cr.Type.String, " ")
+        var unsigned bool = false
+        if len(msFieldType) &gt; 1 &amp;&amp; msFieldType[1] == "unsigned" </span><span class="cov0" title="0">{
+                unsigned = true
+        }</span>
+        <span class="cov8" title="1">typeString := ""
+        if strings.Index(msFieldType[0], "(") &gt; 0 </span><span class="cov8" title="1">{
+                typeString = msFieldType[0][0:strings.Index(msFieldType[0], "(")]
+        }</span> else<span class="cov0" title="0"> {
+                typeString = msFieldType[0]
+        }</span>
+        <span class="cov8" title="1">typeLength := int64(0)
+
+        if strings.Contains(msFieldType[0], "(") &amp;&amp; strings.Index(msFieldType[0], ")") &gt; strings.Index(msFieldType[0], "(") </span><span class="cov8" title="1">{
+                typeLengthStr := msFieldType[0][strings.Index(msFieldType[0], "(")+1 : strings.Index(msFieldType[0], ")")]
+                var err error
+                typeLength, err = strconv.ParseInt(string(typeLengthStr), 0, 64)
+                if err != nil </span><span class="cov0" title="0">{
+                        log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) strconv.ParseInt of (%v) failed with err %v",
+                                cr, sqlV, value, typeLengthStr, err)
+                        return NoTruncated
+                }</span>
+        }
+        <span class="cov8" title="1">log.MSKLog().Debugf("~~~~~~~!!!!!column(%v): checkIfMySQLTruncate sqlV.Type %v typeString %v value %v", cr, sqlV.Type, typeString, string(value))
+        var numOfBits int
+        switch typeString </span>{
+        case msFieldTypeYear:<span class="cov0" title="0"></span>
+                // TODO
+        case msFieldTypeTiny, msFieldTypeShort, msFieldTypeInt24,
+                msFieldTypeLong, msFieldTypeLongLong:<span class="cov0" title="0">
+
+                numOfBits = calNumberOfBitsByFieldTypeInt(typeString)
+                var valueInSQL uint64
+                if strings.Contains(string(value), "-") </span><span class="cov0" title="0">{
+                        valueInSQLInt64, err := strconv.ParseInt(string(value), 0, 64)
+                        if err != nil </span><span class="cov0" title="0">{
+                                err, _ := err.(*strconv.NumError)
+                                if err.Err == strconv.ErrRange </span><span class="cov0" title="0">{
+                                        log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) strconv.ParseInt of %v failed with err %v",
+                                                cr, sqlV, value, string(value), err)
+                                        return Truncated
+                                }</span> else<span class="cov0" title="0"> {
+                                        log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) strconv.ParseInt of %v failed with err %v",
+                                                cr, sqlV, value, string(value), err)
+                                        return NoTruncated
+                                }</span>
+                        }
+                        <span class="cov0" title="0">valueInSQL = uint64(valueInSQLInt64)</span>
+                } else<span class="cov0" title="0"> {
+                        valueInSQLUnInt64, err := strconv.ParseUint(string(value), 0, 64)
+                        if err != nil </span><span class="cov0" title="0">{
+                                err, _ := err.(*strconv.NumError)
+                                if err.Err == strconv.ErrRange </span><span class="cov0" title="0">{
+                                        log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) strconv.ParseUint of %v failed with err %v",
+                                                cr, sqlV, value, string(value), err)
+                                        return Truncated
+                                }</span> else<span class="cov0" title="0"> {
+                                        log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) strconv.ParseUint of %v failed with err %v",
+                                                cr, sqlV, value, string(value), err)
+                                        return NoTruncated
+                                }</span>
+                        }
+                        <span class="cov0" title="0">valueInSQL = valueInSQLUnInt64</span>
+                }
+
+                <span class="cov0" title="0">log.MSKLog().Debugf("@@@@@@@@@@@@@@@@ valueInSQL %v string(value) %v unsigned %v numOfBits %v, unsigned %v",
+                        valueInSQL, string(value), unsigned, numOfBits, unsigned)
+                if unsigned </span><span class="cov0" title="0">{
+                        targetVal, _ := strconv.ParseUint(string(value), 0, numOfBits)
+                        if uint64(targetVal) != valueInSQL </span><span class="cov0" title="0">{
+                                return Truncated
+                        }</span>
+                } else<span class="cov0" title="0"> {
+                        targetVal, _ := strconv.ParseInt(string(value), 0, numOfBits)
+                        if uint64(targetVal) != valueInSQL </span><span class="cov0" title="0">{
+                                return Truncated
+                        }</span>
+                }
+        case msFieldTypeFloat:<span class="cov0" title="0"></span>
+        case msFieldTypeDouble:<span class="cov0" title="0"></span>
+                // TODO
+        case msFieldTypeBit:<span class="cov0" title="0"></span>
+                // https://www.twle.cn/c/yufei/mysqlfav/mysqlfav-basic-bit.html
+                // TODO
+        case msFieldTypeDecimal, msFieldTypeEnum, msFieldTypeSet:<span class="cov0" title="0"></span>
+                // TODO
+
+        case msFieldTypeTinyBLOB, msFieldTypeMediumBLOB, msFieldTypeLongBLOB, msFieldTypeBLOB,
+                msFieldTypeTinyTEXT, msFieldTypeMediumTEXT, msFieldTypeLongTEXT, msFieldTypeTEXT,
+                msFieldTypeString, msFieldTypeJSON, msFieldTypeVarString,
+                msFieldTypeBinary, msFieldTypeVarBinary, msFieldTypeGeometry:<span class="cov8" title="1">
+
+                switch sqlV.Type </span>{
+                case sqlparser.StrVal:<span class="cov8" title="1"></span>
+                case sqlparser.IntVal, sqlparser.FloatVal, sqlparser.HexNum:<span class="cov8" title="1"></span>
+                case sqlparser.HexVal:<span class="cov0" title="0">
+                        var realVal []byte
+                        n, err := fmt.Sscanf(string(value), "%x", &amp;realVal)
+                        if err != nil || n != 1 </span><span class="cov0" title="0">{
+                                log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) fmt.Sscanf failed %v",
+                                        cr, sqlV, value, err)
+                                return NoTruncated
+                        }</span>
+                        <span class="cov0" title="0">value = realVal</span>
+                case sqlparser.BitVal:<span class="cov0" title="0">
+                        byteLen := len(value) / 8
+                        if len(value)%8 &gt; 0 </span><span class="cov0" title="0">{
+                                byteLen += 1
+                        }</span>
+                        <span class="cov0" title="0">value = make([]byte, byteLen)</span>
+                case sqlparser.ValArg:<span class="cov8" title="1"></span>
+                default:<span class="cov0" title="0"></span>
+                }
+                <span class="cov8" title="1">dataTruncUplimit := pcri.uplimit
+                targetValLen := calNumberOfBytesByFieldTypeValue(typeString, typeLength)
+                log.MSKLog().Debugf("################### typeString %v, typeLength %v, targetValLen %v valueLen %v value %v",
+                        typeString, typeLength, targetValLen, len(value), string(value))
+                if int64(len(value)) &gt; targetValLen </span><span class="cov8" title="1">{
+                        return Truncated
+                }</span> else<span class="cov8" title="1"> if int64(len(value)) &gt; int64(float64(targetValLen)*dataTruncUplimit) </span><span class="cov8" title="1">{
+                        return TruncatedWarn
+                }</span>
+
+        case msFieldTypeDate, msFieldTypeTimestamp, msFieldTypeDateTime, msFieldTypeTime:<span class="cov0" title="0"></span>
+                // TODO
+        case msFieldTypeNULL:<span class="cov0" title="0"></span>
+                // TODO
+        default:<span class="cov0" title="0">
+                log.MSKLog().Warnf("checkIfMySQLTruncate:Check(%v, %v, %v) unknown typeString %v",
+                        cr, sqlV, value, typeString)
+                return NoTruncated</span>
+        }
+
+        <span class="cov8" title="1">return NoTruncated</span>
+}
+
+func (pcri *PolicyCheckerFieldsLength) checkValueLengthBy(columnSlice []string, valueSlice []*sqlparser.SQLVal,
+        columnTypeValueMap ColumnMap, args interface{}, argsIdx *int) error <span class="cov8" title="1">{
+
+        // argsIdx := 0
+        argCnt := 0
+        // assert
+        argsSlice, ok := args.([]interface{})
+        if !ok </span><span class="cov0" title="0">{
+                return fmt.Errorf("checkValueLengthBy: args.([]interface{}) failed %v for it's Type %T ",
+                        args, args)
+        }</span>
+        // syslog.Printf("args %v args %T args0 %v args0 %T", args, args, args0, args0)
+
+        <span class="cov8" title="1">for i := 0; i &lt; len(valueSlice); i++ </span><span class="cov8" title="1">{
+                sqlVal := valueSlice[i]
+                if sqlVal != nil &amp;&amp; sqlVal.Type == sqlparser.ValArg </span><span class="cov8" title="1">{
+                        argCnt++
+                }</span>
+        }
+        // assert sth
+        // argCnt 为Update的target的?个数，where及之后条件中的？不是本策略关注的重点
+        <span class="cov8" title="1">if len(argsSlice) &lt; argCnt </span><span class="cov0" title="0">{
+                return fmt.Errorf(
+                        fmt.Sprintf("checkValueLengthBy: len(argsSlice) %v &lt; argCnt %v ",
+                                len(argsSlice), argCnt))
+        }</span>
+
+        // assert sth
+        <span class="cov8" title="1">if len(columnSlice) != len(valueSlice) </span><span class="cov0" title="0">{
+                return fmt.Errorf("checkValueLengthBy: len(columnSlice) %v != len(valueSlice) %v ",
+                        len(columnSlice), len(valueSlice))
+        }</span>
+
+        <span class="cov8" title="1">for i := 0; i &lt; len(columnSlice); i++ </span><span class="cov8" title="1">{
+                columnRecord, ok := columnTypeValueMap[columnSlice[i]]
+                if !ok </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                <span class="cov8" title="1">sqlVal := valueSlice[i]
+                var value []byte
+                if sqlVal == nil </span>{<span class="cov0" title="0">
+                        // *sqlparser.FuncExpr, such as now()
+                }</span> else<span class="cov8" title="1"> if sqlVal.Type == sqlparser.ValArg </span><span class="cov8" title="1">{
+                        value = []byte(fmt.Sprintf("%v", argsSlice[*argsIdx]))
+                        *argsIdx++
+                }</span> else<span class="cov8" title="1"> {
+                        value = sqlVal.Val
+                }</span>
+
+                <span class="cov8" title="1">truncated := pcri.checkIfMySQLTruncate(columnRecord, sqlVal, value)
+                if truncated == Truncated </span><span class="cov8" title="1">{
+                        return ErrFieldDataTruncated
+                }</span> else<span class="cov8" title="1"> if truncated == TruncatedWarn </span><span class="cov8" title="1">{
+                        return WarnFieldDataMayTruncated
+                }</span>
+                // syslog.Printf("~~~~checkValueLengthBy argsSlice[argsIdx] %v argsSlice[argsIdx]  %T reflect.Type(argsSlice[argsIdx]) %v",
+                //         argsSlice[argsIdx], argsSlice[argsIdx], reflect.TypeOf(argsSlice[argsIdx]))
+        }
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+func (pcri *PolicyCheckerFieldsLength) Check(db *sql.DB, explainRecords []ExplainRecord, query string, args []interface{}) error <span class="cov8" title="1">{
+        log.MSKLog().Infof("PolicyCheckerFieldsLength:Check(%v, %v, %v) with %v", explainRecords, query, args, pcri)
+
+        stmt, err := sqlparser.Parse(query)
+        if err != nil </span><span class="cov0" title="0">{
+                log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) sqlparser.Parse failed with err %v",
+                        explainRecords, query, args, err)
+                return nil
+        }</span>
+        <span class="cov8" title="1">switch stmt := stmt.(type) </span>{
+        case *sqlparser.Insert:<span class="cov8" title="1">
+                insertStruct := stmt
+                tableNameString := insertStruct.Table.Name.String()
+
+                columnTypeMap, columnNameSlices, err := MakeColumnRecords(db, tableNameString, MaxTimeoutOfExplain)
+                if err != nil </span><span class="cov0" title="0">{
+                        log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) MakeColumnRecords of %v failed",
+                                explainRecords, query, args, tableNameString)
+                        break</span>
+                }
+                <span class="cov8" title="1">log.MSKLog().Debugf("insertStruct %v columnTypeMap %v", insertStruct, len(columnTypeMap))
+                columnSlice := []string{}
+                for _, column := range insertStruct.Columns </span><span class="cov8" title="1">{
+                        columnName := column.CompliantName()
+                        columnSlice = append(columnSlice, strings.ToUpper(columnName))
+
+                        log.MSKLog().Debugf("tableName %v column %T column %v CompliantName %v",
+                                tableNameString, column, column, column)
+                }</span>
+                // For case of no explicit fields declared, eg. Insert TableName values ....
+                <span class="cov8" title="1">if len(columnSlice) &lt;= 0 </span><span class="cov0" title="0">{
+                        for i := 0; i &lt; len(columnNameSlices); i++ </span><span class="cov0" title="0">{
+                                fieldName := columnNameSlices[i].Field.String
+                                columnSlice = append(columnSlice, fieldName)
+                        }</span>
+                }
+
+                <span class="cov8" title="1">insertValues, ok := insertStruct.Rows.(sqlparser.Values)
+                if !ok </span><span class="cov8" title="1">{
+                        log.MSKLog().Infof("PolicyCheckerFieldsLength:Check(%v, %v, %v) insertStruct.Rows %T failed cast into sqlparser.Values",
+                                explainRecords, query, args, insertStruct.Rows)
+                        break</span>
+                }
+                <span class="cov8" title="1">var argIdx int = 0
+                for _, rowValues := range insertValues </span><span class="cov8" title="1">{
+                        valueSlice := []*sqlparser.SQLVal{}
+                        for _, columnValue := range rowValues </span><span class="cov8" title="1">{
+
+                                insertValueColumn, ok := columnValue.(*sqlparser.SQLVal)
+                                if ok </span><span class="cov8" title="1">{
+                                        valueSlice = append(valueSlice, insertValueColumn)
+                                }</span> else<span class="cov0" title="0"> {
+                                        valueSlice = append(valueSlice, nil)
+                                }</span>
+                        }
+
+                        <span class="cov8" title="1">err = pcri.checkValueLengthBy(columnSlice, valueSlice, columnTypeMap, args, &amp;argIdx)
+                        if err != nil </span><span class="cov8" title="1">{
+                                if err == WarnFieldDataMayTruncated </span><span class="cov8" title="1">{
+                                        return NewPolicyError(WarnPolicyCodeDataTruncate, fmt.Sprintf("Possible data fields near the edge of overflow on table %v with err %v",
+                                                tableNameString, err))
+                                }</span> else<span class="cov8" title="1"> if err != nil </span><span class="cov8" title="1">{
+                                        return NewPolicyError(ErrPolicyCodeDataTruncate, fmt.Sprintf("Possible data fields overflow on table %v with err %v",
+                                                tableNameString, err))
+                                }</span>
+                        }
+                }
+
+        case *sqlparser.Update:<span class="cov8" title="1">
+                updateStruct := stmt
+
+                for _, table := range updateStruct.TableExprs </span><span class="cov8" title="1">{
+
+                        aliaTable := getAliasedTableFromUpdateStmt(table)
+                        if aliaTable == nil </span><span class="cov8" title="1">{
+                                log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) table %T failed cast into sqlparser.AliasedTableExpr",
+                                        explainRecords, query, args, table)
+                                break</span>
+                        }
+
+                        <span class="cov8" title="1">tableName := sqlparser.GetTableName(aliaTable.Expr)
+                        tableNameString := tableName.String()
+                        columnTypeMap, _, err := MakeColumnRecords(db, tableNameString, MaxTimeoutOfExplain)
+                        if err != nil </span><span class="cov8" title="1">{
+                                log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) MakeColumnRecords of %v failed",
+                                        explainRecords, query, args, tableNameString)
+                                break</span>
+                        }
+
+                        <span class="cov8" title="1">var argFilteredIdx int = 0
+                        valueSlice := []*sqlparser.SQLVal{}
+                        columnSlice := []string{}
+                        var argsPrev int = 0
+                        var argsFilterd []interface{}
+                        for _, expr := range updateStruct.Exprs </span><span class="cov8" title="1">{
+                                columnName := expr.Name
+                                var updateExpr *sqlparser.SQLVal
+                                var ok bool
+                                switch expr.Expr.(type) </span>{
+                                case *sqlparser.SQLVal:<span class="cov8" title="1">
+                                        updateExpr, ok = expr.Expr.(*sqlparser.SQLVal)
+                                        if updateExpr.Type == sqlparser.ValArg </span><span class="cov0" title="0">{
+                                                if argFilteredIdx &gt;= len(args) </span><span class="cov0" title="0">{
+                                                        log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) mismatch of number of valArg with argFilteredIdx %v &gt;= len(args) %v",
+                                                                explainRecords, query, args, argFilteredIdx, len(args))
+                                                        ok = false
+                                                        break</span>
+                                                }
+                                                <span class="cov0" title="0">argsFilterd = append(argsFilterd, args[argFilteredIdx])
+                                                argFilteredIdx++</span>
+                                        }
+                                // Complex expression instead of single SQLVal
+                                default:<span class="cov0" title="0">
+                                        // Firstly, calculate the expression by select statement
+                                        buf := sqlparser.NewTrackedBuffer(nil)
+                                        expr.Expr.Format(buf)
+
+                                        // 统计之前的？的个数，选择相应的args
+                                        strWithQues := misc.ReplaceColonMark(buf.String())
+                                        ac := misc.CountQuestionMark(strWithQues)
+                                        if argsPrev+ac &gt; len(args) </span><span class="cov0" title="0">{
+                                                log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) mismatch of number of valArg in %v",
+                                                        explainRecords, query, args, strWithQues)
+                                                ok = false
+                                                break</span>
+                                        }
+                                        <span class="cov0" title="0">updateExpr, err = calExprValue(db, MaxTimeoutOfExplain, strWithQues, args[argsPrev:argsPrev+ac]...)
+                                        if err != nil </span><span class="cov0" title="0">{
+                                                log.MSKLog().Warnf("PolicyCheckerFieldsLength:Check(%v, %v, %v) expr.Expr %T failed(%v) cast into SQLVal",
+                                                        explainRecords, query, args, expr.Expr, err)
+                                                ok = false
+                                                break</span>
+                                        }
+                                        <span class="cov0" title="0">ok = true
+                                        argsPrev += ac
+                                        argFilteredIdx += ac</span>
+                                }
+                                <span class="cov8" title="1">if !ok </span><span class="cov0" title="0">{
+                                        break</span>
+                                }
+
+                                <span class="cov8" title="1">valueSlice = append(valueSlice, updateExpr)
+                                columnSlice = append(columnSlice, strings.ToUpper(columnName.Name.String()))
+                                log.MSKLog().Debugf("tableNameString %T tableNameString %v columnName %v updateExpr %T updateExpr.Type %v",
+                                        tableNameString, tableNameString, columnName.Name.String(), updateExpr, updateExpr.Type)</span>
+                        }
+                        <span class="cov8" title="1">var argIdx int
+                        err = pcri.checkValueLengthBy(columnSlice, valueSlice, columnTypeMap, argsFilterd, &amp;argIdx)
+                        if err == WarnFieldDataMayTruncated </span><span class="cov0" title="0">{
+                                return NewPolicyError(WarnPolicyCodeDataTruncate, fmt.Sprintf("Possible data fields near the edge of overflow on table %v with err %v",
+                                        tableNameString, err))
+                        }</span> else<span class="cov8" title="1"> if err != nil </span><span class="cov8" title="1">{
+                                return NewPolicyError(ErrPolicyCodeDataTruncate, fmt.Sprintf("Possible data fields overflow on table %v with err %v",
+                                        tableNameString, err))
+                        }</span>
+                }
+        }
+        <span class="cov8" title="1">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package policy
+
+import (
+        "database/sql"
+        // "database/sql/driver"
+        "fmt"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+        // syslog "log"
+        "strings"
+)
+
+const (
+        DefaultMaxLinesForTypeALL          = 1000 // 1. 1000行以下且没有使用where的全表扫描是安全的，针对配置表
+        DefaultMaxLinesForTypeALLWithWhere = 100  // 2. 100行以下，使用了where是安全的
+
+        ExtraKeyWordsUsingWhere = "USING WHERE"
+)
+
+// 操作数的类型检查，通过SELECT_TYPE = ALL的方式
+
+type PolicyCheckerFieldsType struct {
+}
+
+func NewPolicyCheckerFieldsType() *PolicyCheckerFieldsType <span class="cov0" title="0">{
+
+        return &amp;PolicyCheckerFieldsType{}
+}</span>
+
+func (pcri *PolicyCheckerFieldsType) Check(db *sql.DB, explainRecords []ExplainRecord, query string, args []interface{}) error <span class="cov0" title="0">{
+        log.MSKLog().Infof("PolicyCheckerFieldsType:Check(%v, %v, %v) with %v", explainRecords, query, args, pcri)
+
+        for i := 0; i &lt; len(explainRecords); i++ </span><span class="cov0" title="0">{
+                var rowsAffected int
+                var err error
+                // syslog.Printf("[DEBUG] +++++ explainRecords[i] %v", explainRecords[i])
+                if rowsAffected, err = explainRecords[i].GetExplainRealRows(); err != nil </span><span class="cov0" title="0">{
+                        // syslog.Printf("[DEBUG] +++++ explainRecords[i].Rows %v query %v", rowsAffected, query)
+                        continue</span>
+                }
+                <span class="cov0" title="0">rowCnt := rowsAffected
+
+                // syslog.Printf("[DEBUG] +++++ explainRecords[i] %v", explainRecords[i])
+                if strings.ToUpper(explainRecords[i].Type.String) == "ALL" </span><span class="cov0" title="0">{
+
+                        if !explainRecords[i].Extra.Valid </span><span class="cov0" title="0">{
+                                // 没有使用where语句,Extra "Using where"，则需要排除类似于配置表(1000行以下)
+                                if rowCnt &gt; DefaultMaxLinesForTypeALL </span><span class="cov0" title="0">{
+                                        return NewPolicyError(ErrPolicyCodeAllTableScan, fmt.Sprintf("Possbile all table scaned on table %v extra %v pkey %v key %v with rows %v",
+                                                explainRecords[i].Table, explainRecords[i].Extra, explainRecords[i].PossibleKeys, explainRecords[i].Key, explainRecords[i].Rows))
+                                }</span> else<span class="cov0" title="0"> {
+                                        log.MSKLog().Infof("PolicyCheckerFieldsType:Check rowcnt%v &lt;= DefaultMaxLinesForTypeALL%v for all table scan, skipped",
+                                                rowCnt, DefaultMaxLinesForTypeALL)
+                                }</span>
+                        } else<span class="cov0" title="0"> {
+                                // using where, but still has full table scans
+                                if rowCnt &gt; DefaultMaxLinesForTypeALLWithWhere </span><span class="cov0" title="0">{
+                                        if strings.Contains(strings.ToUpper(explainRecords[i].Extra.String), ExtraKeyWordsUsingWhere) </span><span class="cov0" title="0">{
+                                                return NewPolicyError(ErrPolicyCodeAllTableScan, fmt.Sprintf("Possbile all table scaned on table %v extra %v pkey %v key %v with rows %v",
+                                                        explainRecords[i].Table, explainRecords[i].Extra, explainRecords[i].PossibleKeys, explainRecords[i].Key, explainRecords[i].Rows))
+                                        }</span>
+                                } else<span class="cov0" title="0"> {
+                                        log.MSKLog().Infof("PolicyCheckerFieldsType:Check rowcnt%v &lt;= DefaultMaxLinesForTypeALLWithWhere%v for all table scan with where, skipped",
+                                                rowCnt, DefaultMaxLinesForTypeALLWithWhere)
+                                }</span>
+                        }
+                }
+        }
+        <span class="cov0" title="0">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package policy
+
+import (
+        "database/sql"
+        // "database/sql/driver"
+        "fmt"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+)
+
+// 操作影响的行数 &gt; 1w
+/*
+        Mark for 0806
+        SELECT 1 FROM redeem_consume WHERE clientid = '1008' and binary redeem = 'nAfewAA8ufddsAaBD'
+*/
+
+type PolicyCheckerRowsAbsolute struct {
+        maxRowsAcceptable int
+}
+
+func NewPolicyCheckerRowsAbsolute(mra int) *PolicyCheckerRowsAbsolute <span class="cov0" title="0">{
+
+        return &amp;PolicyCheckerRowsAbsolute{maxRowsAcceptable: mra}
+}</span>
+
+func (pcri *PolicyCheckerRowsAbsolute) Check(db *sql.DB, explainRecords []ExplainRecord, query string, args []interface{}) error <span class="cov0" title="0">{
+
+        log.MSKLog().Infof("PolicyCheckerRowsAbsolute:Check(%v, %v, %v) with %v", explainRecords, query, args, pcri)
+        for i := 0; i &lt; len(explainRecords); i++ </span><span class="cov0" title="0">{
+                var rowsAffected int
+                var err error
+
+                // log.MSKLog().Warnf("PolicyCheckerRowsAbsolute explainRecords[i] %v = %v", i, explainRecords[i])
+                if rowsAffected, err = explainRecords[i].GetExplainRealRows(); err != nil </span><span class="cov0" title="0">{
+                        // log.Printf("[DEBUG] +++++ explainRecords[i].Rows %v query %v", rowsAffected, query)
+                        continue</span>
+                }
+                <span class="cov0" title="0">rowCnt := rowsAffected
+                if rowCnt &gt; pcri.maxRowsAcceptable </span><span class="cov0" title="0">{
+                        return NewPolicyError(ErrPolicyCodeRowsAbs, fmt.Sprintf("Too many rows affected absolutely: rowcnt %v &gt; pcri.maxRowsAcceptable %v",
+                                rowCnt, pcri.maxRowsAcceptable))
+                }</span>
+        }
+        <span class="cov0" title="0">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">package policy
+
+import (
+        "database/sql"
+        // "database/sql/driver"
+        "fmt"
+        "gitlab.papegames.com/fringe/mskeeper/log"
+)
+
+const DefaultRowsRate float32 = float32(0.3)
+const RowsSafeLine int = 1000
+
+// 操作影响的行数 &gt; 1/3 总行数（count(1)) &amp;&amp; 操作影响的行数 &gt; 1000
+type PolicyCheckerRowsInvolved struct {
+        rate float32
+}
+
+func NewPolicyCheckerRowsInvolved() *PolicyCheckerRowsInvolved <span class="cov0" title="0">{
+
+        return &amp;PolicyCheckerRowsInvolved{rate: DefaultRowsRate}
+}</span>
+
+func (pcri *PolicyCheckerRowsInvolved) Check(db *sql.DB, explainRecords []ExplainRecord, query string, args []interface{}) error <span class="cov0" title="0">{
+
+        log.MSKLog().Infof("PolicyCheckerRowsInvolved:Check(%v, %v, %v) with %v", explainRecords, query, args, pcri)
+        for i := 0; i &lt; len(explainRecords); i++ </span><span class="cov0" title="0">{
+                // log.Printf("[DEBUG] ----- explainRecords[i].Rows %v query %v", explainRecords[i].Rows, query)
+                var rowsAffected int
+                var err error
+                if rowsAffected, err = explainRecords[i].GetExplainRealRows(); err != nil </span><span class="cov0" title="0">{
+                        // log.Printf("[DEBUG] +++++ explainRecords[i].Rows %v query %v", rowsAffected, query)
+                        continue</span>
+                }
+                <span class="cov0" title="0">rowCnt := rowsAffected
+                if !isTableName(explainRecords[i].Table.String) </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                <span class="cov0" title="0">subTableCountQuery := "select count(1) from " + explainRecords[i].Table.String
+                subExplainRecords, err := MakeExplainRecords(db, subTableCountQuery, MaxTimeoutOfExplain, []interface{}{})
+                if err != nil </span><span class="cov0" title="0">{
+                        // 没有行数的直接跳过，包括了
+                        // log.Printf("[DEBUG] +++++ continue explainRecords[i].Rows %v query %v", rowsAffected, query)
+                        continue</span>
+                }
+
+                <span class="cov0" title="0">maxRows := MaxRowsFromExplainRecords(subExplainRecords)
+                // log.Printf("[DEBUG] +++++ explainRecords[i].Rows %v query %v maxRows %v rowsAffected %v", rowCnt, query, maxRows, rowsAffected)
+                if rowCnt &gt; int(float32(maxRows)*pcri.rate) &amp;&amp;
+                        rowCnt &gt; RowsSafeLine </span><span class="cov0" title="0">{
+                        return NewPolicyError(ErrPolicyCodeRowsInvolve, fmt.Sprintf("Too many rows will involve by target sql: rowcnt %v &gt; maxrows %v * pcri.rate %v",
+                                rowCnt, maxRows, pcri.rate))
+                }</span>
+        }
+
+        <span class="cov0" title="0">return nil</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
