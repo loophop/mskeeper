@@ -1,7 +1,5 @@
 mskeeper是基于explain的mysql慢查询监控插件，可用于协助Golang上的mysql安全开发，其分别可通过插件或驱动的方式导入。
 
-[![pipeline status](https://gitlab.papegames.com/fringe/mskeeper/badges/master/pipeline.svg)](https://gitlab.papegames.com/fringe/mskeeper/commits/master) [![coverage report](https://gitlab.papegames.com/fringe/mskeeper/badges/master/coverage.svg)](https://gitlab.papegames.com/fringe/mskeeper/commits/master)
-
 ## Features:
 1.  对上层SQL执行透明，可无痛导入mskeeper插件。
 2.  默认支持Policy的可扩展，目前支持:[触发告警的Policies]
